@@ -12,7 +12,7 @@ from PIL import Image
 from config import load
 from core.models import Profile, ScoreResult
 from scorer.base import Scorer
-from scorer.prompts import SYSTEM, USER_TEMPLATE
+from scorer.prompts import SYSTEM, build_user_message
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +37,20 @@ class GeminiScorer(Scorer):
             },
         )
 
-    async def score(self, profile: Profile, goal: str) -> ScoreResult:
+    async def score(
+        self,
+        profile: Profile,
+        goal: str,
+        style: str | None = None,
+        gen_message_if_score_ge: int | None = None,
+    ) -> ScoreResult:
         parts: list[Any] = [
-            USER_TEMPLATE.format(goal=goal, bio=profile.bio or "(пусто)")
+            build_user_message(
+                goal=goal,
+                bio=profile.bio or "(пусто)",
+                style=style,
+                threshold=gen_message_if_score_ge,
+            )
         ]
 
         for photo in profile.photos[:MAX_PHOTOS]:
@@ -66,7 +77,13 @@ class GeminiScorer(Scorer):
             score_val = 0
         score_val = max(0, min(100, score_val))
         reason = str(data.get("reason", "")).strip() or "(без комментария)"
-        return ScoreResult(score=score_val, reason=reason)
+        message_raw = data.get("message")
+        message = (
+            str(message_raw).strip()
+            if isinstance(message_raw, str) and message_raw.strip()
+            else None
+        )
+        return ScoreResult(score=score_val, reason=reason, message=message)
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any] | None:

@@ -333,6 +333,7 @@ async def cb_collect(query: CallbackQuery) -> None:
             mark = {
                 "incoming": "💌",
                 "mutual_notification": "✨?",
+                "mutual_match": "✨",
                 None: "·",
             }.get(d.get("kind"), "?")
             media = "📷" if d.get("has_media") else "  "

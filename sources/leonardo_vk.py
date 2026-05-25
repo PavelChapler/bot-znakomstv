@@ -111,6 +111,10 @@ class LeonardoVKSource(DatingSource):
                 unparseable_streak = 0
                 continue
 
+            if not has_media and likes_recognizer.is_exhausted(msg.get("text") or ""):
+                log.info("VK: дневной лимит лайков, останавливаюсь")
+                return None
+
             if has_media:
                 no_media_streak = 0
                 profile = await self._parse_profile(msg)
@@ -176,6 +180,8 @@ class LeonardoVKSource(DatingSource):
             return True
 
         if kind == "mutual_notification":
+            # Любой исход после отправки "show" = state мутирован, возвращаем
+            # True всегда, чтобы не сваливаться в dismiss оригинального текста.
             button_texts = self._extract_button_texts(msg)
             show_btn = (
                 likes_recognizer.pick_show_button(button_texts)
@@ -183,27 +189,46 @@ class LeonardoVKSource(DatingSource):
             )
             log.info("VK mutual-notification: отправляю %r", show_btn)
             await self._send_text(show_btn)
-            profile_msg = await self._wait_for_new_message()
-            if profile_msg is None:
-                log.warning("VK mutual-notification: бот не прислал анкету")
-                return False
-            profile = await self._parse_profile(profile_msg)
-            if profile is None:
-                log.warning("VK mutual-notification: анкета не распарсилась")
-                return False
-            url = (
-                likes_recognizer.extract_profile_url(profile_msg.get("text") or "")
-                or self._url_from_attachments(profile_msg)
-            )
-            saved = await likes_pool.save_profile(profile, "mutual", url)
-            log.info(
-                "VK mutual like %s id=%s",
-                "saved" if saved else "duplicate", profile.external_id,
-            )
-            await self.like()
+            response = await self._wait_for_new_message()
+            if response is None:
+                log.warning("VK mutual: бот не ответил после 'show'")
+                return True
+            # Леонардо в VK после клика обычно присылает text-only «Есть взаимная
+            # симпатия! …» без фото — нам всё равно надо это сохранить.
+            saved = await self._save_mutual_match(response)
+            log.info("VK mutual %s", "saved" if saved else "skipped")
+            # self.like() не зовём: «1» уже отработало как подтверждение лайка.
             return True
 
         return False
+
+    async def _save_mutual_match(self, msg: dict[str, Any]) -> bool:
+        """Сохранить mutual-подтверждение в пул. В отличие от _parse_profile
+        не требует наличия фото — bio это сам текст сообщения."""
+        text = (msg.get("text") or "").strip()
+        attachments = msg.get("attachments") or []
+        if not text and not attachments:
+            return False
+        external_id = str(msg.get("id") or "")
+        if not external_id:
+            return False
+        url = (
+            likes_recognizer.extract_profile_url(text)
+            or self._url_from_attachments(msg)
+        )
+        photos: list[bytes] = []
+        for att in attachments:
+            if att.get("type") == "photo":
+                p = await self._download_photo(att.get("photo") or {})
+                if p:
+                    photos.append(p)
+        profile = Profile(
+            source=self.name,
+            external_id=external_id,
+            bio=text,
+            photos=photos,
+        )
+        return await likes_pool.save_profile(profile, "mutual", url)
 
     @staticmethod
     def _url_from_attachments(msg: dict[str, Any]) -> str | None:
@@ -232,8 +257,11 @@ class LeonardoVKSource(DatingSource):
             self._http = None
 
     async def scan_history_for_incoming(self) -> dict[str, Any]:
-        """Прочесть последние SCAN_LOOKBACK сообщений и сохранить incoming-
-        лайки. Действий не совершаем."""
+        """Прочесть последние SCAN_LOOKBACK сообщений и сохранить в пул:
+        - incoming-лайки (классифицируется через classify())
+        - mutual-match-подтверждения (через is_mutual_match() — обычно
+          text-only «Есть взаимная симпатия! …»).
+        Действий не совершаем — только запись с дедупом по msg id."""
         saved = 0
         duplicates = 0
         diag: list[dict[str, Any]] = []
@@ -251,25 +279,32 @@ class LeonardoVKSource(DatingSource):
                 a.get("type") in ("photo", "video", "doc") for a in attachments
             )
             kind = likes_recognizer.classify(text, has_media)
+            is_match = likes_recognizer.is_mutual_match(text)
+            diag_kind = kind or ("mutual_match" if is_match else None)
             diag.append({
                 "id": msg.get("id"),
                 "has_media": has_media,
-                "kind": kind,
+                "kind": diag_kind,
                 "text": text[:120].replace("\n", " "),
             })
-            if kind != "incoming":
-                continue
-            profile = await self._parse_profile(msg)
-            if profile is None:
-                continue
-            url = (
-                likes_recognizer.extract_profile_url(text)
-                or self._url_from_attachments(msg)
-            )
-            if await likes_pool.save_profile(profile, "incoming", url):
-                saved += 1
-            else:
-                duplicates += 1
+
+            if kind == "incoming":
+                profile = await self._parse_profile(msg)
+                if profile is None:
+                    continue
+                url = (
+                    likes_recognizer.extract_profile_url(text)
+                    or self._url_from_attachments(msg)
+                )
+                if await likes_pool.save_profile(profile, "incoming", url):
+                    saved += 1
+                else:
+                    duplicates += 1
+            elif is_match:
+                if await self._save_mutual_match(msg):
+                    saved += 1
+                else:
+                    duplicates += 1
         return {"saved": saved, "duplicates": duplicates, "diag": diag}
 
     # ───────── helpers ─────────

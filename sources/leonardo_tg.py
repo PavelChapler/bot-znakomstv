@@ -112,6 +112,10 @@ class LeonardoTGSource(DatingSource):
                 unparseable_streak = 0
                 continue
 
+            if not has_media and likes_recognizer.is_exhausted(msg.message or ""):
+                log.info("TG: дневной лимит лайков, останавливаюсь")
+                return None
+
             if has_media:
                 no_media_streak = 0
                 profile = await self._parse_profile(msg)
@@ -187,24 +191,50 @@ class LeonardoTGSource(DatingSource):
             log.info("mutual-notification: жму %r", show_btn)
             if not await self._click_button_by_text(show_btn):
                 return False
-            profile_msg = await self._wait_for_new_message()
-            if profile_msg is None:
-                log.warning("mutual-notification: бот не прислал анкету после show")
-                return False
-            profile = await self._parse_profile(profile_msg)
-            if profile is None:
-                log.warning("mutual-notification: анкета не распарсилась")
-                return False
-            url = likes_recognizer.extract_profile_url(profile_msg.message or "")
-            saved = await likes_pool.save_profile(profile, "mutual", url)
-            log.info(
-                "mutual like %s id=%s",
-                "saved" if saved else "duplicate", profile.external_id,
-            )
-            await self.like()
+            # Дальше любой исход = state мутирован, всегда возвращаем True.
+            response = await self._wait_for_new_message()
+            if response is None:
+                log.warning("mutual-notification: бот не ответил после show")
+                return True
+            saved = await self._save_mutual_match(response)
+            log.info("TG mutual %s", "saved" if saved else "skipped")
+            # Если ответ — анкета со swipe-кнопками (а не итоговое
+            # «взаимная симпатия» без media), формализуем лайк.
+            if (
+                response.photo or response.video or response.video_note
+                or response.gif or response.grouped_id
+            ) and not likes_recognizer.is_mutual_match(response.message or ""):
+                await self.like()
             return True
 
         return False
+
+    async def _save_mutual_match(self, msg: Message) -> bool:
+        """Сохранить mutual-подтверждение в пул. Допускает text-only ответы:
+        в TG итоговое «Есть взаимная симпатия! @user» может приходить без
+        медиа, в pending-очереди — наоборот, с фото."""
+        text = msg.message or ""
+        has_any_media = bool(
+            msg.photo or msg.video or msg.video_note or msg.gif or msg.grouped_id
+        )
+        if not text.strip() and not has_any_media:
+            return False
+        external_id = str(msg.id)
+        photos: list[bytes] = []
+        if has_any_media:
+            parsed = await self._parse_profile(msg)
+            if parsed is not None:
+                photos = [p for p in parsed.photos if isinstance(p, bytes)]
+                if not text.strip():
+                    text = parsed.bio
+        url = likes_recognizer.extract_profile_url(text)
+        profile = Profile(
+            source=self.name,
+            external_id=external_id,
+            bio=text.strip(),
+            photos=photos,
+        )
+        return await likes_pool.save_profile(profile, "mutual", url)
 
     async def like(self) -> None:
         if not await self._click_button(LIKE_EMOJIS):
@@ -290,8 +320,8 @@ class LeonardoTGSource(DatingSource):
 
     async def scan_history_for_incoming(self) -> dict[str, Any]:
         """Прочесть последние SCAN_LOOKBACK сообщений Леонардо и сохранить
-        все incoming-лайки. Действий не совершаем — для авто-лайка дальше
-        вызывающий запустит next_profile в цикле."""
+        в пул: incoming-лайки + mutual-match-подтверждения. Действий не
+        совершаем — для авто-лайка дальше вызывающий запустит next_profile."""
         saved = 0
         duplicates = 0
         diag: list[dict[str, Any]] = []
@@ -310,22 +340,28 @@ class LeonardoTGSource(DatingSource):
             )
             text = m.message or ""
             kind = likes_recognizer.classify(text, has_media)
+            is_match = likes_recognizer.is_mutual_match(text)
+            diag_kind = kind or ("mutual_match" if is_match else None)
             diag.append({
                 "id": m.id,
                 "has_media": has_media,
-                "kind": kind,
+                "kind": diag_kind,
                 "text": text[:120].replace("\n", " "),
             })
-            if kind != "incoming":
-                continue
-            profile = await self._parse_profile(m)
-            if profile is None:
-                continue
-            url = likes_recognizer.extract_profile_url(text)
-            if await likes_pool.save_profile(profile, "incoming", url):
-                saved += 1
-            else:
-                duplicates += 1
+            if kind == "incoming":
+                profile = await self._parse_profile(m)
+                if profile is None:
+                    continue
+                url = likes_recognizer.extract_profile_url(text)
+                if await likes_pool.save_profile(profile, "incoming", url):
+                    saved += 1
+                else:
+                    duplicates += 1
+            elif is_match:
+                if await self._save_mutual_match(m):
+                    saved += 1
+                else:
+                    duplicates += 1
         return {"saved": saved, "duplicates": duplicates, "diag": diag}
 
     async def _hammer(self) -> None:

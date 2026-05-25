@@ -16,6 +16,14 @@ router = Router()
 KEY_GOAL = "goal"
 KEY_THRESHOLD = "threshold"
 KEY_DRY_RUN = "dry_run"
+KEY_MESSAGE_ENABLED = "message_enabled"
+KEY_MESSAGE_STYLE = "message_style"
+
+DEFAULT_MESSAGE_STYLE = (
+    "Дружелюбно, искренне, с лёгким юмором, без шаблонов. "
+    "1-2 предложения. Зацепка из bio или фото. На «ты». "
+    "Без приветствий типа «Привет!»."
+)
 
 
 async def get_goal() -> str:
@@ -40,11 +48,25 @@ async def get_dry_run() -> bool:
     return raw == "1"
 
 
+async def get_message_enabled() -> bool:
+    raw = await db.get_setting(KEY_MESSAGE_ENABLED, "0")
+    return raw == "1"
+
+
+async def get_message_style() -> str:
+    val = await db.get_setting(KEY_MESSAGE_STYLE)
+    return val if val else DEFAULT_MESSAGE_STYLE
+
+
 class SetGoal(StatesGroup):
     waiting = State()
 
 
 class SetThreshold(StatesGroup):
+    waiting = State()
+
+
+class SetStyle(StatesGroup):
     waiting = State()
 
 
@@ -142,3 +164,64 @@ async def cb_dry_run(query: CallbackQuery) -> None:
     if query.message:
         await query.message.answer(f"Dry-run: {'ON' if new == '1' else 'OFF'}")
     await query.answer()
+
+
+@router.message(Command("toggle_message"))
+async def cmd_toggle_message(message: Message) -> None:
+    cur = await get_message_enabled()
+    new = "0" if cur else "1"
+    await db.set_setting(KEY_MESSAGE_ENABLED, new)
+    await message.answer(
+        f"Генерация сообщений: {'ON' if new == '1' else 'OFF'}"
+    )
+
+
+@router.callback_query(F.data == "settings:toggle_message")
+async def cb_toggle_message(query: CallbackQuery) -> None:
+    cur = await get_message_enabled()
+    new = "0" if cur else "1"
+    await db.set_setting(KEY_MESSAGE_ENABLED, new)
+    if query.message:
+        await query.message.answer(
+            f"Генерация сообщений: {'ON' if new == '1' else 'OFF'}"
+        )
+    await query.answer()
+
+
+@router.message(Command("style"))
+async def cmd_style(message: Message, state: FSMContext) -> None:
+    cur = await get_message_style()
+    await message.answer(
+        f"Текущий стиль сообщений:\n\n{escape(cur)}\n\n"
+        "Отправь новый текст, чтобы заменить, или /cancel."
+    )
+    await state.set_state(SetStyle.waiting)
+
+
+@router.callback_query(F.data == "settings:style")
+async def cb_style(query: CallbackQuery, state: FSMContext) -> None:
+    cur = await get_message_style()
+    if query.message:
+        await query.message.answer(
+            f"Текущий стиль сообщений:\n\n{escape(cur)}\n\n"
+            "Отправь новый текст, чтобы заменить, или /cancel."
+        )
+    await state.set_state(SetStyle.waiting)
+    await query.answer()
+
+
+@router.message(SetStyle.waiting, Command("cancel"))
+async def cancel_style(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отмена.")
+
+
+@router.message(SetStyle.waiting)
+async def save_style(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пустой текст. Попробуй ещё раз или /cancel.")
+        return
+    await db.set_setting(KEY_MESSAGE_STYLE, text)
+    await state.clear()
+    await message.answer("Стиль сохранён.")

@@ -9,7 +9,13 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from config import load
-from core.handlers.goal import get_dry_run, get_goal, get_threshold
+from core.handlers.goal import (
+    get_dry_run,
+    get_goal,
+    get_message_enabled,
+    get_message_style,
+    get_threshold,
+)
 from core.models import Decision
 from core.registry import get_source_class
 from core.runner import SessionController, SessionStats, run_session
@@ -44,6 +50,9 @@ async def on_source_chosen(query: CallbackQuery) -> None:
     goal = await get_goal()
     threshold = await get_threshold()
     dry_run = await get_dry_run()
+    message_enabled = await get_message_enabled()
+    style = await get_message_style() if message_enabled else None
+    gen_message_if_score_ge = threshold if message_enabled else None
 
     try:
         source = cls()
@@ -71,15 +80,17 @@ async def on_source_chosen(query: CallbackQuery) -> None:
         bio_short = (decision.profile.bio or "").strip().replace("\n", " ")
         if len(bio_short) > 200:
             bio_short = bio_short[:197] + "..."
-        text = (
+        lines = [
             f"{prefix}{emoji} <b>score={decision.score.score}</b> "
-            f"({stats.seen} | ❤️{stats.liked} 👎{stats.skipped})\n"
-            f"<i>{escape(decision.score.reason)}</i>\n"
-            f"{escape(bio_short)}"
-        )
+            f"({stats.seen} | ❤️{stats.liked} 👎{stats.skipped})",
+            f"<i>{escape(decision.score.reason)}</i>",
+            escape(bio_short),
+        ]
+        if decision.score.message:
+            lines.append(f"✉️ <code>{escape(decision.score.message)}</code>")
         try:
             if bot is not None:
-                await bot.send_message(chat_id, text)
+                await bot.send_message(chat_id, "\n".join(lines))
         except Exception:
             log.exception("failed to send progress")
 
@@ -87,6 +98,7 @@ async def on_source_chosen(query: CallbackQuery) -> None:
         f"Запускаю «{cls.title}».\n"
         f"<b>Цель:</b> {escape(goal[:300])}\n"
         f"<b>Порог:</b> {threshold}, <b>dry-run:</b> {'ON' if dry_run else 'OFF'}, "
+        f"<b>msg:</b> {'ON' if message_enabled else 'OFF'}, "
         f"<b>лимит:</b> {cfg.session_max_profiles}\n"
         f"/stop — остановить."
     )
@@ -103,6 +115,8 @@ async def on_source_chosen(query: CallbackQuery) -> None:
                 max_count=cfg.session_max_profiles,
                 controller=controller,
                 on_progress=on_progress,
+                style=style,
+                gen_message_if_score_ge=gen_message_if_score_ge,
             )
         finally:
             stats = controller.stats

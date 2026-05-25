@@ -17,6 +17,7 @@ class Profile:
 class ScoreResult:
     score: int
     reason: str
+    message: str | None = None
 
 
 @dataclass

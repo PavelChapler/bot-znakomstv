@@ -4,12 +4,15 @@ from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from core.handlers.goal import get_message_enabled
 from core.registry import all_sources
 
 router = Router()
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
+async def main_menu_kb() -> InlineKeyboardMarkup:
+    msg_on = await get_message_enabled()
+    msg_label = f"✉️ Сообщение: {'ON' if msg_on else 'OFF'}"
     rows: list[list[InlineKeyboardButton]] = []
     for cls in all_sources():
         rows.append(
@@ -29,6 +32,12 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     )
     rows.append(
         [
+            InlineKeyboardButton(text=msg_label, callback_data="settings:toggle_message"),
+            InlineKeyboardButton(text="Стиль", callback_data="settings:style"),
+        ]
+    )
+    rows.append(
+        [
             InlineKeyboardButton(text="💌 Пул лайков", callback_data="likes:browse"),
             InlineKeyboardButton(text="Собрать лайки", callback_data="likes:menu"),
         ]
@@ -40,10 +49,10 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 async def on_start(message: Message) -> None:
     await message.answer(
         "Главное меню.\nВыбери источник, чтобы запустить сессию, или настройку:",
-        reply_markup=main_menu_kb(),
+        reply_markup=await main_menu_kb(),
     )
 
 
 @router.message(Command("menu"))
 async def on_menu(message: Message) -> None:
-    await message.answer("Меню:", reply_markup=main_menu_kb())
+    await message.answer("Меню:", reply_markup=await main_menu_kb())

@@ -60,6 +60,16 @@ async def init() -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.executescript(SCHEMA)
         await conn.commit()
+        await _migrate(conn)
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Идемпотентные ALTER'ы для уже существующих БД."""
+    async with conn.execute("PRAGMA table_info(decisions)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "message" not in cols:
+        await conn.execute("ALTER TABLE decisions ADD COLUMN message TEXT")
+        await conn.commit()
 
 
 async def get_setting(key: str, default: str | None = None) -> str | None:
@@ -86,8 +96,9 @@ async def log_decision(
 ) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            "INSERT INTO decisions(ts, source, external_id, bio, score, reason, action, dry_run) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO decisions(ts, source, external_id, bio, score, reason,"
+            " action, dry_run, message) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(time.time()),
                 profile.source,
@@ -97,6 +108,7 @@ async def log_decision(
                 score.reason,
                 action,
                 1 if dry_run else 0,
+                score.message,
             ),
         )
         await conn.commit()

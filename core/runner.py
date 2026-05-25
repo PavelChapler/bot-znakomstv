@@ -55,6 +55,8 @@ async def run_session(
     max_count: int,
     controller: SessionController,
     on_progress: ProgressCb,
+    style: str | None = None,
+    gen_message_if_score_ge: int | None = None,
 ) -> None:
     cfg = load()
     await source.start()
@@ -77,7 +79,12 @@ async def run_session(
             controller.stats.seen += 1
 
             try:
-                score_result = await scorer.score(profile, goal)
+                score_result = await scorer.score(
+                    profile,
+                    goal,
+                    style=style,
+                    gen_message_if_score_ge=gen_message_if_score_ge,
+                )
             except Exception as e:
                 log.exception("scorer failed")
                 controller.stats.errors += 1

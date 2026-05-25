@@ -27,7 +27,25 @@ INCOMING_PATTERNS = (
 MUTUAL_NOTIF_PATTERNS = (
     re.compile(r"ты понрав[а-яё]*\s+\S+\s+девушк", re.IGNORECASE),
     re.compile(r"показать\s+(её|ее|их)", re.IGNORECASE),
-    re.compile(r"взаимн", re.IGNORECASE),
+)
+
+# Сообщения вида «Лайки закончились / лимит исчерпан» — дальше бот пытаться
+# смысла нет, выходим сразу, без раунда dismiss/hammer.
+EXHAUSTED_PATTERNS = (
+    re.compile(r"лайк[а-яё]*\s+закончил", re.IGNORECASE),
+    re.compile(r"закончил[а-яё]*\s+лайк", re.IGNORECASE),
+    re.compile(r"лимит\s+лайк", re.IGNORECASE),
+    re.compile(r"исчерпан", re.IGNORECASE),
+)
+
+# Подтверждение взаимного мэтча, которое присылает бот ПОСЛЕ нашего клика
+# «показать» на mutual_notification (в VK обычно text-only «Есть взаимная
+# симпатия! …», в TG может быть и с фото). От mutual_notification отличается
+# тем, что профиль уже раскрыт — лайкать заново не нужно.
+MUTUAL_MATCH_PATTERNS = (
+    re.compile(r"взаимн[а-яё]*\s+симпат", re.IGNORECASE),
+    re.compile(r"добавляй\s+в\s+друз", re.IGNORECASE),
+    re.compile(r"у\s+вас\s+взаимн", re.IGNORECASE),
 )
 
 SHOW_BUTTON_KEYWORDS = ("показать", "посмотреть", "смотреть", "show", "view", "да")
@@ -42,13 +60,24 @@ URL_PATTERNS = (
 
 
 def classify(msg_text: str, has_media: bool) -> str | None:
-    """'incoming' | 'mutual_notification' | None."""
+    """'incoming' | 'mutual_notification' | None.
+
+    'mutual_match' (подтверждение пришедшее ПОСЛЕ нашего клика) сюда
+    не входит — его адаптер обрабатывает напрямую через is_mutual_match()."""
     text = msg_text or ""
     if has_media and _any_match(text, INCOMING_PATTERNS):
         return "incoming"
     if not has_media and _any_match(text, MUTUAL_NOTIF_PATTERNS):
         return "mutual_notification"
     return None
+
+
+def is_exhausted(msg_text: str) -> bool:
+    return _any_match(msg_text or "", EXHAUSTED_PATTERNS)
+
+
+def is_mutual_match(msg_text: str) -> bool:
+    return _any_match(msg_text or "", MUTUAL_MATCH_PATTERNS)
 
 
 def pick_show_button(button_texts: list[str]) -> str | None:
