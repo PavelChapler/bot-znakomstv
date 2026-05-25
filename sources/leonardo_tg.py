@@ -29,10 +29,16 @@ LIKE_EMOJIS = (
     "❣", "🩷", "💜", "🧡", "💛", "💚", "💙", "🤍", "👍", "🔥",
 )
 SKIP_EMOJIS = ("👎", "💔", "✖", "❌")
+# Кнопка «лайк с текстовым сообщением» в UI Леонардо. 📹 — это видео-
+# сообщение, его не берём.
+MESSAGE_EMOJIS = ("💌", "✉", "📨", "✍")
 
 # Fallback-текст, если кнопок вообще не нашли в истории.
 FALLBACK_LIKE_TEXT = "❤"
 FALLBACK_SKIP_TEXT = "👎"
+
+# Сколько ждать после клика «💌», чтобы Леонардо успел спросить текст.
+MESSAGE_PROMPT_DELAY_SEC = 1.5
 
 # Сколько последних сообщений сканировать в поисках клавиатуры/inline-кнопок.
 BUTTON_LOOKBACK = 10
@@ -236,7 +242,22 @@ class LeonardoTGSource(DatingSource):
         )
         return await likes_pool.save_profile(profile, "mutual", url)
 
-    async def like(self) -> None:
+    async def like(self, message: str | None = None) -> None:
+        if message:
+            if await self._click_button(MESSAGE_EMOJIS):
+                log.info("TG: лайк-с-сообщением, текст %d симв.", len(message))
+                await asyncio.sleep(MESSAGE_PROMPT_DELAY_SEC)
+                try:
+                    await self.client.send_message(self.entity, message)
+                    return
+                except Exception:
+                    log.exception("TG: не удалось отправить текст сообщения")
+                    # Падать не будем — обычный лайк уже не поставить
+                    # (мы уже в режиме «введи сообщение»). Останавливаемся.
+                    return
+            log.warning(
+                "TG: кнопки 💌 не нашёл, деградирую до обычного лайка"
+            )
         if not await self._click_button(LIKE_EMOJIS):
             log.warning(
                 "like button not found, sending fallback text %r", FALLBACK_LIKE_TEXT

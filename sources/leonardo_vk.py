@@ -39,6 +39,7 @@ VK_API_VERSION = "5.131"
 #   из главного меню: 1 — «Смотреть анкеты»
 # Если бот сменит схему — поменяй цифры здесь.
 LIKE_TEXT = "1"
+LIKE_WITH_MSG_TEXT = "2"   # «лайк с сообщением» в numeric-меню VK Леонардо
 SKIP_TEXT = "3"
 HAMMER_STEP_1 = "4"   # выход в главное меню
 HAMMER_STEP_2 = "1"   # из главного меню в просмотр анкет
@@ -46,6 +47,9 @@ HAMMER_STEP_2 = "1"   # из главного меню в просмотр ан�
 # обычно "1". Если в keyboard нашлось что-то с keyword «показать» — используем
 # её label; иначе fallback вот на это.
 SHOW_FALLBACK_TEXT = "1"
+
+# Сколько ждать после "2", чтобы Леонардо успел спросить текст сообщения.
+MESSAGE_PROMPT_DELAY_SEC = 1.5
 
 POLL_INTERVAL_SEC = 1.5
 RESPONSE_TIMEOUT_SEC = 25
@@ -243,7 +247,17 @@ class LeonardoVKSource(DatingSource):
                 return f"https://vk.com/id{owner_id}"
         return None
 
-    async def like(self) -> None:
+    async def like(self, message: str | None = None) -> None:
+        if message:
+            log.info("VK: лайк-с-сообщением (отправляю %r + текст %d симв.)",
+                     LIKE_WITH_MSG_TEXT, len(message))
+            await self._send_text(LIKE_WITH_MSG_TEXT)
+            await asyncio.sleep(MESSAGE_PROMPT_DELAY_SEC)
+            try:
+                await self._send_text(message)
+            except Exception:
+                log.exception("VK: не удалось отправить текст сообщения")
+            return
         log.info("VK: like (отправляю %r)", LIKE_TEXT)
         await self._send_text(LIKE_TEXT)
 

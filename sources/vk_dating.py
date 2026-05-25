@@ -14,7 +14,7 @@ class VKDatingSource(DatingSource):
     async def next_profile(self) -> Profile | None:
         raise NotImplementedError
 
-    async def like(self) -> None:
+    async def like(self, message: str | None = None) -> None:
         raise NotImplementedError
 
     async def skip(self) -> None:

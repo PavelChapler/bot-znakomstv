@@ -102,7 +102,7 @@ async def run_session(
                 if dry_run:
                     await source.skip()
                 elif action == "like":
-                    await source.like()
+                    await source.like(message=score_result.message)
                 else:
                     await source.skip()
             except Exception:
