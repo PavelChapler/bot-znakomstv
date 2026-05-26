@@ -6,7 +6,17 @@ from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InputMediaPhoto,
+    Message,
+)
+
+# TG ограничение: caption на media — 1024 символа. Длиннее не примет.
+TG_CAPTION_MAX = 1024
+# Максимум фото в одном альбоме.
+TG_ALBUM_MAX = 10
 
 from config import load
 from core.handlers.goal import (
@@ -88,11 +98,52 @@ async def on_source_chosen(query: CallbackQuery) -> None:
         ]
         if decision.score.message:
             lines.append(f"✉️ <code>{escape(decision.score.message)}</code>")
+        text = "\n".join(lines)
+
+        photos = [
+            p for p in decision.profile.photos
+            if isinstance(p, (bytes, bytearray))
+        ][:TG_ALBUM_MAX]
+
+        if bot is None:
+            return
         try:
-            if bot is not None:
-                await bot.send_message(chat_id, "\n".join(lines))
+            if not photos:
+                await bot.send_message(chat_id, text)
+                return
+            caption = text if len(text) <= TG_CAPTION_MAX else None
+            if len(photos) == 1:
+                await bot.send_photo(
+                    chat_id,
+                    BufferedInputFile(bytes(photos[0]), filename="photo.jpg"),
+                    caption=caption,
+                )
+            else:
+                media = [
+                    InputMediaPhoto(
+                        media=BufferedInputFile(
+                            bytes(photos[0]), filename="photo_0.jpg"
+                        ),
+                        caption=caption,
+                    )
+                ] + [
+                    InputMediaPhoto(
+                        media=BufferedInputFile(
+                            bytes(p), filename=f"photo_{i}.jpg"
+                        )
+                    )
+                    for i, p in enumerate(photos[1:], start=1)
+                ]
+                await bot.send_media_group(chat_id, media)
+            if caption is None:
+                # Подпись не влезла в media — шлём отдельным сообщением.
+                await bot.send_message(chat_id, text)
         except Exception:
-            log.exception("failed to send progress")
+            log.exception("failed to send progress with photos, fallback to text")
+            try:
+                await bot.send_message(chat_id, text)
+            except Exception:
+                log.exception("fallback text send also failed")
 
     await query.message.answer(
         f"Запускаю «{cls.title}».\n"
