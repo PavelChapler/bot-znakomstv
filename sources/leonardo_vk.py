@@ -58,6 +58,11 @@ HAMMER_DELAY_SEC = 3.0
 # Сколько последних сообщений тянуть в scan_history_for_incoming.
 SCAN_LOOKBACK = 100
 
+# После «1» (show) на mutual_notification ждём, чтобы Леонардо успел
+# прислать и анкету, и служебное меню — потом забираем БАТЧ и ищем нужное.
+MUTUAL_SETTLE_SEC = 2.5
+MUTUAL_BATCH_LIMIT = 10
+
 
 class LeonardoVKSource(DatingSource):
     name = "leonardo_vk"
@@ -184,8 +189,8 @@ class LeonardoVKSource(DatingSource):
             return True
 
         if kind == "mutual_notification":
-            # Любой исход после отправки "show" = state мутирован, возвращаем
-            # True всегда, чтобы не сваливаться в dismiss оригинального текста.
+            # State мутируется кликом «1», поэтому возвращаем True всегда —
+            # outer loop не должен трактовать оригинальный текст как dismiss.
             button_texts = self._extract_button_texts(msg)
             show_btn = (
                 likes_recognizer.pick_show_button(button_texts)
@@ -193,22 +198,71 @@ class LeonardoVKSource(DatingSource):
             )
             log.info("VK mutual-notification: отправляю %r", show_btn)
             await self._send_text(show_btn)
-            response = await self._wait_for_new_message()
-            if response is None:
+            # Леонардо обычно шлёт пачкой: анкета-мэтч + служебное меню.
+            # Берём батч и выбираем нужное — НЕ полагаемся на «самое свежее».
+            await asyncio.sleep(MUTUAL_SETTLE_SEC)
+            new_msgs = await self._fetch_new_inbound(limit=MUTUAL_BATCH_LIMIT)
+            if not new_msgs:
                 log.warning("VK mutual: бот не ответил после 'show'")
                 return True
-            # Леонардо в VK после клика обычно присылает text-only «Есть взаимная
-            # симпатия! …» без фото — нам всё равно надо это сохранить.
-            saved = await self._save_mutual_match(response)
-            log.info("VK mutual %s", "saved" if saved else "skipped")
+            self._last_seen_id = max(
+                m.get("id", 0) or 0 for m in new_msgs
+            )
+            match_msg = next(
+                (m for m in new_msgs
+                 if likes_recognizer.is_mutual_match(m.get("text") or "")),
+                None,
+            )
+            if match_msg is None:
+                # Запасной: первое с фото-аттачем (вдруг текст без ключевых слов).
+                match_msg = next(
+                    (m for m in new_msgs if any(
+                        a.get("type") == "photo"
+                        for a in (m.get("attachments") or [])
+                    )),
+                    None,
+                )
+            if match_msg is None:
+                log.warning(
+                    "VK mutual: не нашёл match среди %d новых: %r",
+                    len(new_msgs),
+                    [(m.get("id"), (m.get("text") or "")[:60]) for m in new_msgs],
+                )
+                return True
+            saved = await self._save_mutual_match(match_msg)
+            log.info(
+                "VK mutual %s id=%s", "saved" if saved else "skipped",
+                match_msg.get("id"),
+            )
             # self.like() не зовём: «1» уже отработало как подтверждение лайка.
             return True
 
         return False
 
+    async def _fetch_new_inbound(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Все входящие из чата с id > self._last_seen_id, по возрастанию id.
+        last_seen_id здесь НЕ обновляем — это делает caller."""
+        data = await self._api(
+            "messages.getHistory", peer_id=self._peer_id, count=limit
+        )
+        items = (data or {}).get("items") or []
+        out: list[dict[str, Any]] = []
+        for m in items:
+            if m.get("out", 0) != 0:
+                continue
+            mid = m.get("id")
+            if mid is None:
+                continue
+            if self._last_seen_id is None or mid > self._last_seen_id:
+                out.append(m)
+        out.sort(key=lambda m: m.get("id") or 0)
+        return out
+
     async def _save_mutual_match(self, msg: dict[str, Any]) -> bool:
         """Сохранить mutual-подтверждение в пул. В отличие от _parse_profile
-        не требует наличия фото — bio это сам текст сообщения."""
+        не требует фото — bio это сам текст. Защита: требуется хотя бы один
+        признак профиля (match-фраза, фото или URL), иначе откажемся —
+        чтобы случайно не записать сервисное меню Леонардо."""
         text = (msg.get("text") or "").strip()
         attachments = msg.get("attachments") or []
         if not text and not attachments:
@@ -216,10 +270,17 @@ class LeonardoVKSource(DatingSource):
         external_id = str(msg.get("id") or "")
         if not external_id:
             return False
+        has_photo = any(a.get("type") == "photo" for a in attachments)
         url = (
             likes_recognizer.extract_profile_url(text)
             or self._url_from_attachments(msg)
         )
+        if not (likes_recognizer.is_mutual_match(text) or has_photo or url):
+            log.info(
+                "VK mutual_match: пропускаю — нет признаков профиля: %r",
+                text[:80],
+            )
+            return False
         photos: list[bytes] = []
         for att in attachments:
             if att.get("type") == "photo":

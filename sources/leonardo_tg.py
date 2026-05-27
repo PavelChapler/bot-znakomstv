@@ -55,6 +55,11 @@ HAMMER_DELAY_SEC = 1.0
 # Сколько последних сообщений просматривать в scan_history_for_incoming.
 SCAN_LOOKBACK = 80
 
+# После клика «показать» на mutual_notification ждём, чтобы Леонардо успел
+# прислать пачку (анкета-мэтч + меню), потом забираем батч и ищем нужное.
+MUTUAL_SETTLE_SEC = 2.5
+MUTUAL_BATCH_LIMIT = 10
+
 
 class LeonardoTGSource(DatingSource):
     name = "leonardo_tg"
@@ -197,33 +202,86 @@ class LeonardoTGSource(DatingSource):
             log.info("mutual-notification: жму %r", show_btn)
             if not await self._click_button_by_text(show_btn):
                 return False
-            # Дальше любой исход = state мутирован, всегда возвращаем True.
-            response = await self._wait_for_new_message()
-            if response is None:
+            # State мутирован — всегда возвращаем True.
+            await asyncio.sleep(MUTUAL_SETTLE_SEC)
+            new_msgs = await self._fetch_new_inbound(limit=MUTUAL_BATCH_LIMIT)
+            if not new_msgs:
                 log.warning("mutual-notification: бот не ответил после show")
                 return True
-            saved = await self._save_mutual_match(response)
-            log.info("TG mutual %s", "saved" if saved else "skipped")
-            # Если ответ — анкета со swipe-кнопками (а не итоговое
-            # «взаимная симпатия» без media), формализуем лайк.
-            if (
-                response.photo or response.video or response.video_note
-                or response.gif or response.grouped_id
-            ) and not likes_recognizer.is_mutual_match(response.message or ""):
+            self._last_seen_id = max(m.id for m in new_msgs)
+            match_msg = next(
+                (m for m in new_msgs
+                 if likes_recognizer.is_mutual_match(m.message or "")),
+                None,
+            )
+            if match_msg is None:
+                # Запасной: первое сообщение с медиа (это «pending» анкета
+                # без характерной взаимка-фразы).
+                match_msg = next(
+                    (m for m in new_msgs if (
+                        m.photo or m.video or m.video_note
+                        or m.gif or m.grouped_id
+                    )),
+                    None,
+                )
+            if match_msg is None:
+                log.warning(
+                    "mutual: не нашёл match среди %d новых: %r",
+                    len(new_msgs),
+                    [(m.id, (m.message or "")[:60]) for m in new_msgs],
+                )
+                return True
+            saved = await self._save_mutual_match(match_msg)
+            log.info(
+                "TG mutual %s id=%s", "saved" if saved else "skipped", match_msg.id,
+            )
+            # Лайк после mutual только если ответ — анкета со swipe-кнопками
+            # (pending-очередь), а не итоговое «взаимная симпатия» текстом.
+            has_media = bool(
+                match_msg.photo or match_msg.video or match_msg.video_note
+                or match_msg.gif or match_msg.grouped_id
+            )
+            if has_media and not likes_recognizer.is_mutual_match(
+                match_msg.message or ""
+            ):
                 await self.like()
             return True
 
         return False
 
+    async def _fetch_new_inbound(self, limit: int = 10) -> list[Message]:
+        """Все входящие из чата с id > self._last_seen_id, по возрастанию id.
+        last_seen_id НЕ обновляем — это делает caller."""
+        new: list[Message] = []
+        async for m in self.client.iter_messages(self.entity, limit=limit):
+            if m.out:
+                continue
+            if self._last_seen_id is not None and m.id <= self._last_seen_id:
+                continue
+            new.append(m)
+        new.sort(key=lambda m: m.id)
+        return new
+
     async def _save_mutual_match(self, msg: Message) -> bool:
         """Сохранить mutual-подтверждение в пул. Допускает text-only ответы:
         в TG итоговое «Есть взаимная симпатия! @user» может приходить без
-        медиа, в pending-очереди — наоборот, с фото."""
+        медиа, в pending-очереди — наоборот, с фото.
+
+        Защита: требуется хотя бы один признак профиля (match-фраза, медиа
+        или URL), иначе откажемся — чтобы не записать сервисное меню."""
         text = msg.message or ""
         has_any_media = bool(
             msg.photo or msg.video or msg.video_note or msg.gif or msg.grouped_id
         )
         if not text.strip() and not has_any_media:
+            return False
+        url = likes_recognizer.extract_profile_url(text)
+        is_match = likes_recognizer.is_mutual_match(text)
+        if not (is_match or has_any_media or url):
+            log.info(
+                "TG mutual_match: пропускаю — нет признаков профиля: %r",
+                text[:80],
+            )
             return False
         external_id = str(msg.id)
         photos: list[bytes] = []
@@ -233,7 +291,6 @@ class LeonardoTGSource(DatingSource):
                 photos = [p for p in parsed.photos if isinstance(p, bytes)]
                 if not text.strip():
                     text = parsed.bio
-        url = likes_recognizer.extract_profile_url(text)
         profile = Profile(
             source=self.name,
             external_id=external_id,
