@@ -1,13 +1,32 @@
 from __future__ import annotations
 
-from aiogram import Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram import F, Router
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 from core.handlers.goal import get_message_enabled
 from core.registry import all_sources
 
 router = Router()
+
+# Текст постоянной кнопки внизу экрана. Нажатие = пользователь шлёт этот
+# текст боту, который мы перехватываем и показываем inline-меню.
+MENU_BUTTON_TEXT = "📋 Меню"
+
+
+def main_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=MENU_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 async def main_menu_kb() -> InlineKeyboardMarkup:
@@ -46,13 +65,28 @@ async def main_menu_kb() -> InlineKeyboardMarkup:
 
 
 @router.message(CommandStart())
-async def on_start(message: Message) -> None:
+async def on_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    # Первое сообщение прибивает постоянную кнопку «📋 Меню» к чату.
     await message.answer(
-        "Главное меню.\nВыбери источник, чтобы запустить сессию, или настройку:",
+        "Кнопка 📋 Меню теперь всегда снизу — можно не печатать /start.",
+        reply_markup=main_reply_kb(),
+    )
+    await message.answer(
+        "Главное меню. Выбери источник или настройку:",
         reply_markup=await main_menu_kb(),
     )
 
 
 @router.message(Command("menu"))
-async def on_menu(message: Message) -> None:
+async def on_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Меню:", reply_markup=await main_menu_kb())
+
+
+# StateFilter('*') — ловим нажатие даже когда FSM ждёт ввод (цели/порога/
+# стиля), и сначала аккуратно сбрасываем состояние.
+@router.message(StateFilter("*"), F.text == MENU_BUTTON_TEXT)
+async def on_menu_button(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer("Меню:", reply_markup=await main_menu_kb())
