@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import TelegramObject, User
 
+from autochat.handlers import router as autochat_router
 from config import load
 from core.handlers import goal, likes, menu, sources, status
 
@@ -45,4 +46,5 @@ def build_bot_and_dispatcher() -> tuple[Bot, Dispatcher]:
     dp.include_router(sources.router)
     dp.include_router(status.router)
     dp.include_router(likes.router)
+    dp.include_router(autochat_router)
     return bot, dp

@@ -5,8 +5,11 @@ import logging
 
 from aiogram.types import BotCommand
 
+from autochat.engine import AutoChatEngine
+from config import load
 from core import db
 from core.bot import build_bot_and_dispatcher
+from core.telethon_conn import stop_shared_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +28,10 @@ BOT_COMMANDS = [
     BotCommand(command="dry_run", description="Переключить dry-run"),
     BotCommand(command="toggle_message", description="Сообщения on/off"),
     BotCommand(command="style", description="Стиль сообщений"),
+    BotCommand(command="autochat", description="🤖 Автопереписка"),
+    BotCommand(command="autochat_list", description="Список диалогов"),
+    BotCommand(command="autochat_goal", description="Цель автопереписки"),
+    BotCommand(command="autochat_style", description="Стиль автопереписки"),
     BotCommand(command="start", description="Перезапуск + кнопка меню"),
 ]
 
@@ -33,10 +40,18 @@ async def main() -> None:
     await db.init()
     bot, dp = build_bot_and_dispatcher()
     await bot.set_my_commands(BOT_COMMANDS)
+
+    cfg = load()
+    notify_id = next(iter(cfg.owner_tg_ids), None)
+    engine = AutoChatEngine(bot=bot, notify_chat_id=notify_id)
+    engine.start()
+
     log.info("starting polling")
     try:
         await dp.start_polling(bot)
     finally:
+        await engine.stop()
+        await stop_shared_client()
         await bot.session.close()
 
 

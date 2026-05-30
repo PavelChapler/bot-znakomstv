@@ -5,12 +5,12 @@ import logging
 from io import BytesIO
 from typing import Any
 
-from telethon import TelegramClient
 from telethon.tl.custom import Message
 
-from config import SESSIONS_DIR, load
+from config import load
 from core import likes_pool
 from core.models import Profile
+from core.telethon_conn import get_shared_client
 from sources import dismiss, likes_recognizer
 from sources.base import DatingSource
 from sources.media import extract_video_frames
@@ -72,16 +72,14 @@ class LeonardoTGSource(DatingSource):
                 "Не заполнены TELETHON_API_ID / TELETHON_API_HASH в .env"
             )
         self._cfg = cfg
-        self.client = TelegramClient(
-            str(SESSIONS_DIR / "leonardo_tg"),
-            cfg.telethon_api_id,
-            cfg.telethon_api_hash,
-        )
+        # Клиент берём из shared singleton — иначе autochat.TelethonChatter
+        # и эта сессия конкурировали бы за один .session файл.
+        self.client = None  # type: ignore[assignment]
         self.entity = None
         self._last_seen_id: int | None = None
 
     async def start(self) -> None:
-        await self.client.start(phone=self._cfg.telethon_phone)
+        self.client = await get_shared_client()
         log.info("Telethon connected (Leonardo TG)")
         self.entity = await self.client.get_entity(BOT_USERNAME)
         # _last_seen_id оставляем None, чтобы на первой итерации забрать
@@ -394,7 +392,10 @@ class LeonardoTGSource(DatingSource):
         return False
 
     async def stop(self) -> None:
-        await self.client.disconnect()
+        # Не дисконнектим shared-клиент — он живёт на всё время работы бота
+        # и используется autochat-engine'ом. Просто отпускаем локальную ссылку.
+        self.client = None  # type: ignore[assignment]
+        self.entity = None
 
     async def scan_history_for_incoming(self) -> dict[str, Any]:
         """Прочесть последние SCAN_LOOKBACK сообщений Леонардо и сохранить

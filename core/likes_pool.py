@@ -24,7 +24,7 @@ async def save_profile(
 ) -> bool:
     """Сохранить Profile + метаданные в пул. True — записали, False — дубль."""
     photo_paths = _write_photos(profile)
-    return await db.save_liked(
+    saved = await db.save_liked(
         source=profile.source,
         external_id=profile.external_id,
         kind=kind,
@@ -32,6 +32,23 @@ async def save_profile(
         profile_url=profile_url,
         photo_paths=photo_paths,
     )
+    if saved:
+        # Опциональный hook автопереписки. Импорт через try-except: при
+        # удалении модуля autochat/ всё молча отключится.
+        try:
+            from autochat.trigger import enqueue_async
+            await enqueue_async(
+                source=profile.source,
+                external_id=profile.external_id,
+                profile_url=profile_url,
+                bio=profile.bio or "",
+            )
+        except ImportError:
+            pass
+        except Exception:
+            log.exception("autochat trigger failed for %s/%s",
+                          profile.source, profile.external_id)
+    return saved
 
 
 def _write_photos(profile: Profile) -> list[str]:

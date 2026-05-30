@@ -53,6 +53,39 @@ CREATE TABLE IF NOT EXISTS liked_pool (
 );
 
 CREATE INDEX IF NOT EXISTS idx_liked_pool_ts ON liked_pool(discovered_ts);
+
+-- Автопереписка. Модуль autochat/, выключаемая фича.
+CREATE TABLE IF NOT EXISTS autochat_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    profile_url TEXT NOT NULL,
+    peer_id TEXT,
+    state TEXT NOT NULL,
+    goal_prompt TEXT NOT NULL,
+    style_prompt TEXT NOT NULL,
+    scheduled_send_ts INTEGER,
+    last_activity_ts INTEGER NOT NULL,
+    last_external_msg_id TEXT,
+    done_reason TEXT,
+    msg_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(source, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autochat_state ON autochat_conversations(state);
+CREATE INDEX IF NOT EXISTS idx_autochat_sched ON autochat_conversations(scheduled_send_ts);
+
+CREATE TABLE IF NOT EXISTS autochat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    external_msg_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_autochat_msgs_conv
+    ON autochat_messages(conversation_id, ts);
 """
 
 

@@ -61,6 +61,11 @@ async def main_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Собрать лайки", callback_data="likes:menu"),
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(text="🤖 Авточат", callback_data="autochat:menu"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
