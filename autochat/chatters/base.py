@@ -37,3 +37,11 @@ class Chatter(ABC):
     ) -> list[ConvMessage]:
         """Все её сообщения с external_msg_id > after_msg_id, по возрастанию ts.
         Объекты возвращаются с conversation_id=0 — caller проставит."""
+
+    async def fetch_full_history(
+        self, peer: str, limit: int = 50
+    ) -> list[ConvMessage]:
+        """Все сообщения чата (us + her) по возрастанию ts. Для бэкфилла
+        истории при ре-активации авточата из пула. По умолчанию пусто —
+        адаптеры должны переопределить, если поддерживают."""
+        return []

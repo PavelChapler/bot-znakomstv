@@ -170,6 +170,7 @@ def _kb(index: int, total: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Вперёд →", callback_data=f"likes:open:{next_idx}"),
         ],
         [
+            InlineKeyboardButton(text="🤖 В авточат", callback_data=f"likes:reuse:{index}"),
             InlineKeyboardButton(text="✖ Удалить", callback_data=f"likes:del:{index}"),
         ],
     ])
@@ -203,6 +204,70 @@ def _first_photo(item: dict) -> str | None:
 @router.callback_query(F.data == "likes:noop")
 async def cb_noop(query: CallbackQuery) -> None:
     await query.answer()
+
+
+@router.callback_query(F.data.startswith("likes:reuse:"))
+async def cb_reuse(query: CallbackQuery) -> None:
+    """Кнопка «🤖 В авточат» в карточке пула.
+
+    Орчестратор reuse_from_pool делает всё: импорт DM-истории, выбор
+    opener/continuation, отправка. Здесь только маршрутизация + ack.
+    """
+    assert query.data is not None
+    index = int(query.data.split(":")[2])
+    items = await db.list_liked()
+    if not items or index >= len(items):
+        await query.answer("Запись пропала", show_alert=True)
+        return
+    pool_id = int(items[index]["id"])
+
+    # Импорты внутри: модуль autochat можно удалить — пропадёт только эта
+    # кнопка, остальная карточка работать продолжит.
+    try:
+        from autochat.engine import get_engine
+        from autochat.reuse import reuse_from_pool
+    except ImportError:
+        await query.answer("autochat-модуль отсутствует", show_alert=True)
+        return
+
+    engine = get_engine()
+    if engine is None:
+        await query.answer("Autochat engine не запущен", show_alert=True)
+        return
+
+    await query.answer("Перезапускаю авточат...")
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    chat_id = msg.chat.id
+    bot = query.bot
+
+    async def runner() -> None:
+        try:
+            result = await reuse_from_pool(pool_id, engine)
+        except Exception as e:
+            log.exception("reuse_from_pool crashed")
+            if bot is not None:
+                try:
+                    await bot.send_message(
+                        chat_id, f"🤖 Ошибка автореактивации: {e}",
+                    )
+                except Exception:
+                    pass
+            return
+        if bot is None:
+            return
+        prefix = "🤖" if result.get("ok") else "⚠️"
+        text = f"{prefix} {result.get('message', '')}"
+        sent_text = result.get("sent_text")
+        if sent_text:
+            text += f"\n\nОтправлено:\n<code>{escape(str(sent_text))}</code>"
+        try:
+            await bot.send_message(chat_id, text)
+        except Exception:
+            log.exception("autochat reuse notify failed")
+
+    engine.schedule_side_task(runner())
 
 
 @router.message(Command("collect_likes"))

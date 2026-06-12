@@ -10,11 +10,14 @@ from core import db
 
 KEY_ENABLED = "autochat_enabled"
 KEY_DELAY_SEC = "autochat_delay_sec"
+KEY_REPLY_DELAY_SEC = "autochat_reply_delay_sec"
 KEY_MAX_MSGS = "autochat_max_msgs"
 KEY_GOAL_PROMPT = "autochat_goal_prompt"
 KEY_STYLE_PROMPT = "autochat_style_prompt"
+KEY_TRANSCRIBE_VOICE = "autochat_transcribe_voice"
 
-DEFAULT_DELAY_SEC = 300  # 5 минут
+DEFAULT_DELAY_SEC = 300  # 5 минут — пауза перед первым сообщением (opener)
+DEFAULT_REPLY_DELAY_SEC = 300  # 5 минут — пауза перед ответом в активном диалоге
 DEFAULT_MAX_MSGS = 15
 
 DEFAULT_GOAL_PROMPT = (
@@ -46,6 +49,16 @@ async def get_delay_sec() -> int:
         return DEFAULT_DELAY_SEC
 
 
+async def get_reply_delay_sec() -> int:
+    """Пауза перед нашим ответом в активном диалоге — чтобы не отвечать
+    мгновенно, как робот. Отсчитывается от её последнего сообщения."""
+    raw = await db.get_setting(KEY_REPLY_DELAY_SEC)
+    try:
+        return int(raw) if raw else DEFAULT_REPLY_DELAY_SEC
+    except ValueError:
+        return DEFAULT_REPLY_DELAY_SEC
+
+
 async def get_max_msgs() -> int:
     raw = await db.get_setting(KEY_MAX_MSGS)
     try:
@@ -62,3 +75,12 @@ async def get_goal_prompt() -> str:
 async def get_style_prompt() -> str:
     val = await db.get_setting(KEY_STYLE_PROMPT)
     return val if val else DEFAULT_STYLE_PROMPT
+
+
+async def is_transcribe_voice_enabled() -> bool:
+    raw = await db.get_setting(KEY_TRANSCRIBE_VOICE, "1")  # default ON
+    return raw == "1"
+
+
+async def set_transcribe_voice(value: bool) -> None:
+    await db.set_setting(KEY_TRANSCRIBE_VOICE, "1" if value else "0")

@@ -1,12 +1,16 @@
 """Фоновый цикл автопереписки.
 
 Раз в TICK_INTERVAL_SEC:
-  1. Если выключено — спим дальше.
-  2. Recovery: заполняем pending для записей liked_pool, у которых нет
-     conversation (раз в RECOVERY_EVERY_SEC).
-  3. pending с истёкшим scheduled_send_ts → opener.
-  4. active → poll новых её сообщений → respond или close по сигналу brain.
-  5. active с msg_count >= max_msgs → close(reason='cap').
+  1. Авто-добыча (ТОЛЬКО при включённом общем тумблере):
+     - Recovery: заполняем pending для записей liked_pool без
+       conversation (раз в RECOVERY_EVERY_SEC).
+     - pending с истёкшим scheduled_send_ts → opener.
+  2. active → poll новых её сообщений; отвечаем (respond) только когда
+     последнее слово за ней и с её сообщения прошла reply_delay —
+     не отвечаем мгновенно. close по сигналу brain; active с
+     msg_count >= max_msgs → close(reason='cap').
+     При выключенном тумблере обслуживаем ТОЛЬКО ручные диалоги
+     (manual=1, кнопка «В авточат»); авто-диалоги заморожены.
 
 Семафор `_send_lock` сериализует отправки + случайная пауза 5-10 сек
 после каждой → анти-spam.
@@ -39,6 +43,20 @@ INTER_SEND_MAX_SEC = 10.0
 HISTORY_LIMIT = 50
 
 
+_singleton: "AutoChatEngine | None" = None
+
+
+def get_engine() -> "AutoChatEngine | None":
+    """Глобальная ссылка на engine для хендлеров. Устанавливается в
+    main.py через `set_engine(...)` после создания инстанса."""
+    return _singleton
+
+
+def set_engine(engine: "AutoChatEngine") -> None:
+    global _singleton
+    _singleton = engine
+
+
 class AutoChatEngine:
     def __init__(
         self, bot: Bot | None = None, notify_chat_id: int | None = None
@@ -52,6 +70,7 @@ class AutoChatEngine:
         self._send_lock = asyncio.Lock()
         self._floodwait_until = 0
         self._last_recovery_ts = 0
+        self._side_tasks: set[asyncio.Task] = set()
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -59,6 +78,8 @@ class AutoChatEngine:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        for task in list(self._side_tasks):
+            task.cancel()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
@@ -75,8 +96,7 @@ class AutoChatEngine:
         log.info("autochat engine started")
         while not self._stop_event.is_set():
             try:
-                if await config.is_enabled():
-                    await self._tick()
+                await self._tick()
             except Exception:
                 log.exception("autochat tick crashed")
             try:
@@ -92,21 +112,26 @@ class AutoChatEngine:
         if now < self._floodwait_until:
             return
 
-        # Recovery: дозаливаем pending по liked_pool
-        if now - self._last_recovery_ts >= RECOVERY_EVERY_SEC:
-            self._last_recovery_ts = now
-            await self._recovery_scan(now)
+        enabled = await config.is_enabled()
 
-        # Pending due → opener
-        due = await autochat_db.find_due_pending(now, limit=10)
-        for conv in due:
-            if self._stop_event.is_set():
-                return
-            await self._fire_opener(conv)
+        if enabled:
+            # Авто-добыча только при включённом тумблере.
+            # Recovery: дозаливаем pending по liked_pool
+            if now - self._last_recovery_ts >= RECOVERY_EVERY_SEC:
+                self._last_recovery_ts = now
+                await self._recovery_scan(now)
 
-        # Active → poll + respond
+            # Pending due → opener
+            due = await autochat_db.find_due_pending(now, limit=10)
+            for conv in due:
+                if self._stop_event.is_set():
+                    return
+                await self._fire_opener(conv)
+
+        # Active → poll + respond. При OFF обслуживаем только ручные
+        # диалоги (manual=1); авто-диалоги заморожены до включения.
         active = await autochat_db.list_conversations(
-            states=["active"], limit=50
+            states=["active"], limit=50, manual_only=not enabled,
         )
         max_msgs = await config.get_max_msgs()
         for conv in active:
@@ -225,6 +250,7 @@ class AutoChatEngine:
         ch = await self._get_chatter(conv.source)
         if ch is None:
             return
+        # 1. Затягиваем её новые сообщения (если есть).
         try:
             new_msgs = await ch.fetch_new_replies(
                 conv.peer_id, conv.last_external_msg_id
@@ -238,20 +264,29 @@ class AutoChatEngine:
         except Exception:
             log.exception("autochat poll failed conv %d", conv.id)
             return
-        if not new_msgs:
-            return
-        for m in new_msgs:
-            await autochat_db.append_message(
-                conv.id, "her", m.text, m.external_msg_id, ts=m.ts,
-            )
-        last_id = new_msgs[-1].external_msg_id or ""
-        await autochat_db.update_after_incoming(conv.id, last_id)
+        if new_msgs:
+            for m in new_msgs:
+                await autochat_db.append_message(
+                    conv.id, "her", m.text, m.external_msg_id, ts=m.ts,
+                )
+            last_id = new_msgs[-1].external_msg_id or ""
+            await autochat_db.update_after_incoming(conv.id, last_id)
 
-        bio = await autochat_db.get_pool_bio(conv.source, conv.external_id)
+        # 2. Решаем, отвечать ли сейчас. Отвечаем только если последнее
+        #    слово за ней и с её сообщения прошла задержка — иначе ждём
+        #    (ответим на одном из следующих тиков). Так не отвечаем
+        #    мгновенно и выжидаем, пока она дописала серию реплик.
         history_msgs = await autochat_db.list_messages(
             conv.id, limit=HISTORY_LIMIT
         )
-        history_pairs = [(m.role, m.text) for m in history_msgs]
+        if not history_msgs or history_msgs[-1].role != "her":
+            return
+        reply_delay = await config.get_reply_delay_sec()
+        if int(time.time()) - history_msgs[-1].ts < reply_delay:
+            return
+
+        bio = await autochat_db.get_pool_bio(conv.source, conv.external_id)
+        history_pairs = [(m.role, m.text, m.ts) for m in history_msgs]
         try:
             brain = await self._get_brain()
         except Exception:
@@ -272,8 +307,18 @@ class AutoChatEngine:
                     conv.id, "us", result.reply, msg_id,
                 )
                 await autochat_db.update_after_outgoing(conv.id, msg_id)
+            elif int(time.time()) < self._floodwait_until:
+                # FloodWait — транзиентно, повторим после паузы движка.
+                log.warning(
+                    "autochat conv %d: ответ отложен из-за FloodWait", conv.id
+                )
+                return
             else:
+                # Реальный сбой отправки — закрываем как failed (как в
+                # opener'е), чтобы не ретраить каждый тик.
                 log.warning("autochat conv %d: ответ не отправился", conv.id)
+                await self._close(conv, reason="send_failed", failed=True)
+                return
 
         if result.done:
             await self._close(
@@ -324,3 +369,34 @@ class AutoChatEngine:
             await self.bot.send_message(self.notify_chat_id, text)
         except Exception:
             log.exception("autochat notify_done failed")
+
+    # ───── Публичные хуки для reuse-флоу ─────
+
+    async def get_chatter(self, source: str) -> Chatter | None:
+        """Внешний доступ к chatter-пулу: переиспользуем уже подключённый
+        клиент в reuse-флоу."""
+        return await self._get_chatter(source)
+
+    async def get_brain(self) -> GeminiChatBrain:
+        return await self._get_brain()
+
+    async def serialized_send(
+        self, ch: Chatter, peer: str, text: str
+    ) -> str | None:
+        return await self._serialized_send(ch, peer, text)
+
+    async def notify_user(self, text: str) -> None:
+        if self.bot is None or self.notify_chat_id is None:
+            return
+        try:
+            await self.bot.send_message(self.notify_chat_id, text)
+        except Exception:
+            log.exception("autochat notify_user failed")
+
+    def schedule_side_task(self, coro) -> asyncio.Task:
+        """Запустить корутину параллельно. Engine следит за ссылкой,
+        чтобы task не уехал в gc."""
+        task = asyncio.create_task(coro)
+        self._side_tasks.add(task)
+        task.add_done_callback(self._side_tasks.discard)
+        return task

@@ -24,6 +24,10 @@ class Conversation:
     last_external_msg_id: str | None
     done_reason: str | None
     msg_count: int
+    # True — диалог добавлен вручную (кнопка «В авточат»). Такие движок
+    # обслуживает даже при выключенном общем тумблере; авто-диалоги при
+    # OFF заморожены.
+    manual: bool = False
 
 
 @dataclass

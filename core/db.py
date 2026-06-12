@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS autochat_conversations (
     last_external_msg_id TEXT,
     done_reason TEXT,
     msg_count INTEGER NOT NULL DEFAULT 0,
+    manual INTEGER NOT NULL DEFAULT 0,
     UNIQUE(source, external_id)
 );
 
@@ -102,6 +103,17 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         cols = {row[1] for row in await cur.fetchall()}
     if "message" not in cols:
         await conn.execute("ALTER TABLE decisions ADD COLUMN message TEXT")
+        await conn.commit()
+
+    async with conn.execute(
+        "PRAGMA table_info(autochat_conversations)"
+    ) as cur:
+        ac_cols = {row[1] for row in await cur.fetchall()}
+    if "manual" not in ac_cols:
+        await conn.execute(
+            "ALTER TABLE autochat_conversations "
+            "ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+        )
         await conn.commit()
 
 

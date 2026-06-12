@@ -26,6 +26,7 @@ def _row_to_conv(row: aiosqlite.Row) -> Conversation:
         last_external_msg_id=row["last_external_msg_id"],
         done_reason=row["done_reason"],
         msg_count=row["msg_count"],
+        manual=bool(row["manual"]),
     )
 
 
@@ -48,20 +49,22 @@ async def create_conversation(
     goal_prompt: str,
     style_prompt: str,
     scheduled_send_ts: int,
+    manual: bool = False,
 ) -> int | None:
     """Создать pending-диалог. None если уже есть запись с таким
-    (source, external_id) — дедуп."""
+    (source, external_id) — дедуп. manual=True — добавлен вручную."""
     now = int(time.time())
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
             "INSERT OR IGNORE INTO autochat_conversations"
             "(source, external_id, profile_url, peer_id, state, goal_prompt,"
             " style_prompt, scheduled_send_ts, last_activity_ts,"
-            " last_external_msg_id, done_reason, msg_count) "
-            "VALUES(?, ?, ?, NULL, 'pending', ?, ?, ?, ?, NULL, NULL, 0)",
+            " last_external_msg_id, done_reason, msg_count, manual) "
+            "VALUES(?, ?, ?, NULL, 'pending', ?, ?, ?, ?, NULL, NULL, 0, ?)",
             (
                 source, external_id, profile_url,
                 goal_prompt, style_prompt, scheduled_send_ts, now,
+                1 if manual else 0,
             ),
         )
         await conn.commit()
@@ -83,16 +86,23 @@ async def get_conversation(conv_id: int) -> Conversation | None:
 async def list_conversations(
     states: Iterable[str] | None = None,
     limit: int = 100,
+    manual_only: bool = False,
 ) -> list[Conversation]:
-    sql = "SELECT * FROM autochat_conversations"
-    params: tuple[Any, ...] = ()
+    conds: list[str] = []
+    params_list: list[Any] = []
     if states:
         states_list = list(states)
         placeholders = ",".join("?" for _ in states_list)
-        sql += f" WHERE state IN ({placeholders})"
-        params = tuple(states_list)
+        conds.append(f"state IN ({placeholders})")
+        params_list.extend(states_list)
+    if manual_only:
+        conds.append("manual = 1")
+    sql = "SELECT * FROM autochat_conversations"
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY last_activity_ts DESC LIMIT ?"
-    params = params + (limit,)
+    params_list.append(limit)
+    params: tuple[Any, ...] = tuple(params_list)
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         async with conn.execute(sql, params) as cur:
@@ -254,3 +264,75 @@ async def list_recent_pool_without_conv(
             (since_ts, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_pool_entry_by_id(pool_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT source, external_id, profile_url, bio "
+            "FROM liked_pool WHERE id = ?",
+            (pool_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def find_conv_by_pool_key(
+    source: str, external_id: str
+) -> Conversation | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT * FROM autochat_conversations "
+            "WHERE source = ? AND external_id = ? LIMIT 1",
+            (source, external_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return _row_to_conv(row) if row else None
+
+
+async def get_existing_msg_ids(conv_id: int) -> set[str]:
+    """Все external_msg_id уже сохранённых сообщений диалога — для дедупа
+    при импорте истории."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT external_msg_id FROM autochat_messages "
+            "WHERE conversation_id = ? AND external_msg_id IS NOT NULL",
+            (conv_id,),
+        ) as cur:
+            return {row[0] for row in await cur.fetchall()}
+
+
+async def reset_conv_for_reuse(
+    conv_id: int,
+    peer_id: str,
+    last_external_msg_id: str | None,
+    new_msg_count: int,
+) -> None:
+    """Сбросить done/failed-диалог в active с обновлёнными peer_id и
+    last_external_msg_id (после импорта истории). Помечаем manual=1 —
+    реактивация всегда ручная (кнопка «В авточат»)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE autochat_conversations "
+            "SET state='active', done_reason=NULL, peer_id=?, "
+            "    last_external_msg_id=COALESCE(?, last_external_msg_id), "
+            "    last_activity_ts=?, msg_count=?, scheduled_send_ts=NULL, "
+            "    manual=1 "
+            "WHERE id = ?",
+            (peer_id, last_external_msg_id, int(time.time()),
+             new_msg_count, conv_id),
+        )
+        await conn.commit()
+
+
+async def set_manual(conv_id: int) -> None:
+    """Пометить диалог ведомым вручную — движок обслуживает его даже при
+    выключенном общем тумблере."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE autochat_conversations SET manual = 1 WHERE id = ?",
+            (conv_id,),
+        )
+        await conn.commit()

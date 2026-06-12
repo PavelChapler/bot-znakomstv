@@ -5,7 +5,7 @@ import logging
 
 from aiogram.types import BotCommand
 
-from autochat.engine import AutoChatEngine
+from autochat.engine import AutoChatEngine, set_engine
 from config import load
 from core import db
 from core.bot import build_bot_and_dispatcher
@@ -44,6 +44,7 @@ async def main() -> None:
     cfg = load()
     notify_id = next(iter(cfg.owner_tg_ids), None)
     engine = AutoChatEngine(bot=bot, notify_chat_id=notify_id)
+    set_engine(engine)
     engine.start()
 
     log.info("starting polling")

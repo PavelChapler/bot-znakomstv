@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ import google.generativeai as genai
 
 from autochat.prompts import (
     SYSTEM,
+    build_continue_user_message,
     build_opener_user_message,
     build_reply_user_message,
 )
@@ -60,6 +62,7 @@ class GeminiChatBrain:
             goal=goal,
             profile_bio=profile_bio,
             profile_url=profile_url,
+            now_ts=int(time.time()),
         )
         return await self._call(user)
 
@@ -70,7 +73,7 @@ class GeminiChatBrain:
         goal: str,
         profile_bio: str,
         profile_url: str,
-        history: list[tuple[str, str]],
+        history: list[tuple[str, str, int]],
     ) -> BrainResult:
         user = build_reply_user_message(
             style=style,
@@ -78,6 +81,26 @@ class GeminiChatBrain:
             profile_bio=profile_bio,
             profile_url=profile_url,
             history=history,
+            now_ts=int(time.time()),
+        )
+        return await self._call(user)
+
+    async def continue_conversation(
+        self,
+        *,
+        style: str,
+        goal: str,
+        profile_bio: str,
+        profile_url: str,
+        history: list[tuple[str, str, int]],
+    ) -> BrainResult:
+        user = build_continue_user_message(
+            style=style,
+            goal=goal,
+            profile_bio=profile_bio,
+            profile_url=profile_url,
+            history=history,
+            now_ts=int(time.time()),
         )
         return await self._call(user)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from io import BytesIO
 
 from telethon.errors import (
     FloodWaitError,
@@ -17,8 +18,10 @@ from telethon.errors import (
     UserPrivacyRestrictedError,
 )
 
+from autochat import config as ac_config
 from autochat.chatters.base import Chatter
 from autochat.models import ConvMessage
+from autochat.transcribe import transcribe_audio
 from core.telethon_conn import get_shared_client
 
 log = logging.getLogger(__name__)
@@ -91,12 +94,15 @@ class TelethonChatter(Chatter):
                     continue
                 if after_int is not None and m.id <= after_int:
                     break  # iter_messages идёт по убыванию id
+                text = await self._resolve_text(m)
+                if not text:
+                    continue  # стикер/неподдерживаемое медиа
                 ts = int(m.date.timestamp()) if m.date else 0
                 new.append(ConvMessage(
                     id=0, conversation_id=0,
                     ts=ts,
                     role="her",
-                    text=m.message or "",
+                    text=text,
                     external_msg_id=str(m.id),
                 ))
         except Exception:
@@ -104,6 +110,56 @@ class TelethonChatter(Chatter):
             return []
         new.sort(key=lambda x: x.ts)
         return new
+
+    async def fetch_full_history(
+        self, peer: str, limit: int = 50
+    ) -> list[ConvMessage]:
+        if self.client is None:
+            return []
+        out: list[ConvMessage] = []
+        try:
+            async for m in self.client.iter_messages(peer, limit=limit):
+                text = await self._resolve_text(m)
+                if not text:
+                    continue  # стикеры / нерасшифровываемое
+                ts = int(m.date.timestamp()) if m.date else 0
+                out.append(ConvMessage(
+                    id=0, conversation_id=0,
+                    ts=ts,
+                    role="us" if m.out else "her",
+                    text=text,
+                    external_msg_id=str(m.id),
+                ))
+        except Exception:
+            log.exception("TG fetch_full_history for %s failed", peer)
+            return []
+        out.sort(key=lambda x: x.ts)
+        return out
+
+    async def _resolve_text(self, m) -> str:
+        """Текст реплики: либо m.message, либо расшифровка голосового.
+        Возвращает «» если ничего полезного нет (стикер и т.п.)."""
+        raw = m.message or ""
+        if raw.strip():
+            return raw
+        has_voice = bool(m.voice or m.audio)
+        if not has_voice:
+            return ""
+        if not await ac_config.is_transcribe_voice_enabled():
+            return "[голосовое сообщение]"
+        buf = BytesIO()
+        try:
+            await m.download_media(file=buf)
+        except Exception:
+            log.exception("TG voice download failed msg=%s", m.id)
+            return "[голосовое, не скачалось]"
+        audio = buf.getvalue()
+        if not audio:
+            return "[голосовое, пусто]"
+        text = await transcribe_audio(audio, mime_type="audio/ogg")
+        if not text:
+            return "[голосовое, не распознано]"
+        return f"[голосовое] {text}"
 
 
 _TG_HANDLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")

@@ -43,6 +43,7 @@ class SetAutochatStyle(StatesGroup):
 
 async def _menu_kb() -> InlineKeyboardMarkup:
     enabled = await config.is_enabled()
+    voice_on = await config.is_transcribe_voice_enabled()
     counts = await autochat_db.count_by_state()
     total = sum(counts.values())
     pending = counts.get("pending", 0)
@@ -50,6 +51,7 @@ async def _menu_kb() -> InlineKeyboardMarkup:
     done = counts.get("done", 0)
     failed = counts.get("failed", 0)
     toggle_label = f"Автопереписка: {'ON 🟢' if enabled else 'OFF ⚪'}"
+    voice_label = f"🎙 Голос: {'ON' if voice_on else 'OFF'}"
     list_label = (
         f"📋 Диалоги ({active} активн., {pending} ждут, {done}✅, {failed}❌)"
     )
@@ -59,6 +61,7 @@ async def _menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎯 Цель", callback_data="autochat:goal"),
             InlineKeyboardButton(text="🎭 Стиль", callback_data="autochat:style"),
         ],
+        [InlineKeyboardButton(text=voice_label, callback_data="autochat:toggle_voice")],
         [InlineKeyboardButton(text=list_label, callback_data="autochat:list")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -72,7 +75,8 @@ async def cmd_autochat(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"<b>🤖 Автопереписка</b>\n\n"
         f"Бот пишет первый месседж через {await config.get_delay_sec()} сек "
-        f"после mutual, потом ведёт диалог через Gemini пока он не сигналит "
+        f"после mutual, потом ведёт диалог через Gemini (отвечает с паузой "
+        f"~{await config.get_reply_delay_sec()} сек) пока он не сигналит "
         f"«цель достигнута». Лимит: {await config.get_max_msgs()} наших сообщений.",
         reply_markup=await _menu_kb(),
     )
@@ -96,6 +100,19 @@ async def cb_toggle(query: CallbackQuery) -> None:
     if query.message and isinstance(query.message, Message):
         await query.message.answer(
             f"Автопереписка: <b>{new_state}</b>",
+            reply_markup=await _menu_kb(),
+        )
+    await query.answer()
+
+
+@router.callback_query(F.data == "autochat:toggle_voice")
+async def cb_toggle_voice(query: CallbackQuery) -> None:
+    cur = await config.is_transcribe_voice_enabled()
+    await config.set_transcribe_voice(not cur)
+    new_state = "ON" if not cur else "OFF"
+    if query.message and isinstance(query.message, Message):
+        await query.message.answer(
+            f"🎙 Расшифровка голосовых: <b>{new_state}</b>",
             reply_markup=await _menu_kb(),
         )
     await query.answer()
@@ -338,6 +355,8 @@ def _format_conv_card(conv) -> str:
     now = int(time.time())
     ago = _humanize_ago(now - conv.last_activity_ts)
     st = STATE_LABEL.get(conv.state, conv.state)
+    if getattr(conv, "manual", False):
+        st += " · 🖐 ручной"
     sched = ""
     if conv.state == "pending" and conv.scheduled_send_ts:
         delta = conv.scheduled_send_ts - now
