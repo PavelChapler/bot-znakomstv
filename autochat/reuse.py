@@ -24,6 +24,11 @@ from autochat import config
 from autochat import db as autochat_db
 from autochat.engine import AutoChatEngine
 from autochat.models import Conversation
+from autochat.prompts import (
+    AI_DETECTED_FAREWELL,
+    AI_DETECTED_NOTIFY,
+    looks_like_ai_accusation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +171,30 @@ async def reuse_from_pool(
                 "ничего не шлю — движок сам ответит, когда она напишет "
                 "(диалог ручной, работает и при выключенном общем авточате)."
             ),
+            "conv_id": conv_id,
+        }
+
+    # Она раскусила ИИ? Ловим детерминированно по её последним репликам ДО
+    # нейросети: шлём фиксированное прощание и закрываем как handoff.
+    her_tail: list[str] = []
+    for m in reversed(full):
+        if m.role != "her":
+            break
+        her_tail.append(m.text or "")
+    if looks_like_ai_accusation(" ".join(her_tail)):
+        msg_id = await engine.serialized_send(chatter, peer, AI_DETECTED_FAREWELL)
+        if msg_id is not None:
+            await autochat_db.append_message(
+                conv_id, "us", AI_DETECTED_FAREWELL, msg_id
+            )
+            await autochat_db.update_after_outgoing(conv_id, msg_id)
+        await autochat_db.update_state(
+            conv_id, "done", done_reason=AI_DETECTED_NOTIFY
+        )
+        return {
+            "ok": True,
+            "action": "ai_detected",
+            "message": "Она раскусила ИИ — отправил прощание, диалог закрыт.",
             "conv_id": conv_id,
         }
 

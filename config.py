@@ -41,6 +41,9 @@ class Config:
     gemini_api_key: str
     gemini_model: str
 
+    anthropic_api_key: str
+    anthropic_model: str
+
     default_threshold: int
     default_goal: str
     session_max_profiles: int
@@ -76,6 +79,8 @@ def load() -> Config:
         vk_leonardo_group=os.getenv("VK_LEONARDO_GROUP", "dayvinchik"),
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         default_threshold=_int("DEFAULT_THRESHOLD", 70),
         default_goal=os.getenv(
             "DEFAULT_GOAL",

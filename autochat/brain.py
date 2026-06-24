@@ -1,8 +1,13 @@
-"""Gemini-обёртка для генерации сообщений автопереписки.
+"""Claude-обёртка для генерации сообщений автопереписки.
+
+На Anthropic Claude переведена ТОЛЬКО автопереписка. Скоринг анкет,
+сообщения к лайкам (`scorer/`) и расшифровка голосовых (`transcribe.py`)
+остаются на Gemini — у Claude нет аудио-входа, поэтому войсы по-прежнему
+расшифровывает Gemini, а текст уже отдаётся сюда.
 
 Stateless: каждый вызов отдаёт системный промпт + style + goal + полную
-историю. Источник истины — БД, in-memory state Gemini'а не используем
-(start_chat) — после рестарта потеряется, а БД переживёт.
+историю. Источник истины — БД, in-memory state модели не используем —
+после рестарта потеряется, а БД переживёт.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import google.generativeai as genai
+from anthropic import AsyncAnthropic
 
 from autochat.prompts import (
     SYSTEM,
@@ -26,6 +31,35 @@ from config import load
 
 log = logging.getLogger(__name__)
 
+# Реплики короткие (1-3 предложения) + маленький JSON — 1024 с запасом.
+MAX_TOKENS = 1024
+# Лёгкая вариативность, чтобы реплики не были шаблонными. Sonnet 4.6 и
+# Haiku 4.5 ещё принимают temperature (в отличие от Opus 4.7+/Fable 5).
+TEMPERATURE = 0.8
+
+# Structured outputs: гарантируем валидный JSON нужной формы. Поля строковые
+# (пустая строка = «нечего слать» / «нет причины») — так обходимся без
+# nullable-типов, которые structured outputs не гарантирует.
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {
+            "type": "string",
+            "description": (
+                "текст следующего сообщения; пустая строка, если done "
+                "и слать нечего"
+            ),
+        },
+        "done": {"type": "boolean"},
+        "done_reason": {
+            "type": "string",
+            "description": "краткая причина, если done=true, иначе пустая строка",
+        },
+    },
+    "required": ["reply", "done", "done_reason"],
+    "additionalProperties": False,
+}
+
 
 @dataclass
 class BrainResult:
@@ -34,20 +68,15 @@ class BrainResult:
     done_reason: str | None
 
 
-class GeminiChatBrain:
+class ClaudeChatBrain:
     def __init__(self) -> None:
         cfg = load()
-        if not cfg.gemini_api_key:
-            raise RuntimeError("Не заполнен GEMINI_API_KEY в .env")
-        genai.configure(api_key=cfg.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            cfg.gemini_model,
-            system_instruction=SYSTEM,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.7,
-            },
-        )
+        if not cfg.anthropic_api_key:
+            raise RuntimeError(
+                "Не задан ANTHROPIC_API_KEY (в окружении или .env)"
+            )
+        self.model = cfg.anthropic_model
+        self.client = AsyncAnthropic(api_key=cfg.anthropic_api_key)
 
     async def generate_opener(
         self,
@@ -106,24 +135,41 @@ class GeminiChatBrain:
 
     async def _call(self, user_text: str) -> BrainResult:
         try:
-            resp = await self.model.generate_content_async(user_text)
+            resp = await self.client.messages.create(
+                model=self.model,
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE,
+                system=SYSTEM,
+                messages=[{"role": "user", "content": user_text}],
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "schema": _RESPONSE_SCHEMA,
+                    }
+                },
+            )
         except Exception as e:
-            log.exception("Gemini autochat error")
+            log.exception("Claude autochat error")
             return BrainResult(
-                reply=None, done=True, done_reason=f"gemini error: {e}"
+                reply=None, done=True, done_reason=f"claude error: {e}"
             )
 
-        # safety-фильтр: ответ пустой, finish_reason ≠ STOP
-        try:
-            finish_reason = resp.candidates[0].finish_reason.name  # type: ignore[union-attr]
-        except Exception:
-            finish_reason = "UNKNOWN"
-        text = (getattr(resp, "text", "") or "").strip()
+        # Контент-модерация: stop_reason="refusal" → content может не
+        # соответствовать схеме, читать его нельзя. Закрываем диалог.
+        if resp.stop_reason == "refusal":
+            return BrainResult(
+                reply=None, done=True, done_reason="refusal (safety)"
+            )
+
+        text = next(
+            (b.text for b in resp.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
         if not text:
             return BrainResult(
                 reply=None,
                 done=True,
-                done_reason=f"empty response (finish={finish_reason})",
+                done_reason=f"empty response (stop={resp.stop_reason})",
             )
 
         data = _parse_json(text)

@@ -26,6 +26,7 @@ from core.models import Profile
 from sources import dismiss, likes_recognizer
 from sources.base import DatingSource
 from sources.media import extract_video_frames
+from core.vk_throttle import vk_post
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,12 @@ SHOW_FALLBACK_TEXT = "1"
 
 # Сколько ждать после "2", чтобы Леонардо успел спросить текст сообщения.
 MESSAGE_PROMPT_DELAY_SEC = 1.5
+# Маркер приглашения Леонардо ввести текст лайка-с-сообщением (ответ на "2").
+# Пока его не увидим — текст НЕ шлём: иначе он улетит в экран анкеты как
+# неверная команда и рассинхронит весь цикл лайков.
+MSG_PROMPT_MARKER = "напиши сообщение"
+# Сколько раз опросить входящие, ожидая это приглашение.
+MSG_PROMPT_POLLS = 3
 
 POLL_INTERVAL_SEC = 1.5
 RESPONSE_TIMEOUT_SEC = 25
@@ -310,10 +317,36 @@ class LeonardoVKSource(DatingSource):
 
     async def like(self, message: str | None = None) -> None:
         if message:
-            log.info("VK: лайк-с-сообщением (отправляю %r + текст %d симв.)",
-                     LIKE_WITH_MSG_TEXT, len(message))
+            log.info("VK: лайк-с-сообщением — шлю %r и жду приглашение",
+                     LIKE_WITH_MSG_TEXT)
             await self._send_text(LIKE_WITH_MSG_TEXT)
-            await asyncio.sleep(MESSAGE_PROMPT_DELAY_SEC)
+            # Подтверждаем, что Леонардо реально перешёл в режим ввода
+            # сообщения, и ТОЛЬКО тогда шлём текст. Иначе при асинхронных
+            # вставках Леонардо («Ты понравился…», промо) "2" не открывает
+            # ввод, текст уходит в экран анкеты как неверная команда и весь
+            # цикл рассинхронивается.
+            new_msgs: list[dict[str, Any]] = []
+            for _ in range(MSG_PROMPT_POLLS):
+                await asyncio.sleep(MESSAGE_PROMPT_DELAY_SEC)
+                batch = await self._fetch_new_inbound(limit=MUTUAL_BATCH_LIMIT)
+                if batch:
+                    new_msgs = batch
+                if any(MSG_PROMPT_MARKER in (m.get("text") or "").lower()
+                       for m in new_msgs):
+                    break
+            if not any(MSG_PROMPT_MARKER in (m.get("text") or "").lower()
+                       for m in new_msgs):
+                # Десинк: приглашения нет. Текст НЕ шлём и last_seen НЕ
+                # двигаем — пусть next_profile сам разберёт/задисмиссит
+                # пришедшие экраны на следующем витке.
+                log.warning(
+                    "VK: после %r не пришло «%s» (пришло: %r) — текст не шлю",
+                    LIKE_WITH_MSG_TEXT, MSG_PROMPT_MARKER,
+                    [(m.get("text") or "")[:40] for m in new_msgs],
+                )
+                return
+            # Приглашение есть — потребляем эти сообщения и шлём текст.
+            self._last_seen_id = max(m.get("id", 0) or 0 for m in new_msgs)
             try:
                 await self._send_text(message)
             except Exception:
@@ -503,11 +536,8 @@ class LeonardoVKSource(DatingSource):
     async def _api(self, method: str, **params: Any) -> dict[str, Any] | None:
         assert self._http is not None
         params = {**params, "access_token": self._token, "v": VK_API_VERSION}
-        try:
-            resp = await self._http.post(f"{VK_API_BASE}/{method}", data=params)
-            data = resp.json()
-        except Exception:
-            log.exception("VK call %s failed", method)
+        data = await vk_post(self._http, method, params)
+        if data is None:
             return None
         if "error" in data:
             err = data["error"]

@@ -75,7 +75,7 @@ async def cmd_autochat(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"<b>🤖 Автопереписка</b>\n\n"
         f"Бот пишет первый месседж через {await config.get_delay_sec()} сек "
-        f"после mutual, потом ведёт диалог через Gemini (отвечает с паузой "
+        f"после mutual, потом ведёт диалог через Claude (отвечает с паузой "
         f"~{await config.get_reply_delay_sec()} сек) пока он не сигналит "
         f"«цель достигнута». Лимит: {await config.get_max_msgs()} наших сообщений.",
         reply_markup=await _menu_kb(),

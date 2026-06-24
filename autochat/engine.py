@@ -28,7 +28,12 @@ from telethon.errors import FloodWaitError
 
 from autochat import config
 from autochat import db as autochat_db
-from autochat.brain import GeminiChatBrain
+from autochat.brain import ClaudeChatBrain
+from autochat.prompts import (
+    AI_DETECTED_FAREWELL,
+    AI_DETECTED_NOTIFY,
+    looks_like_ai_accusation,
+)
 from autochat.chatters import get_chatter_class
 from autochat.chatters.base import Chatter
 from autochat.models import Conversation
@@ -66,7 +71,7 @@ class AutoChatEngine:
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._chatters: dict[str, Chatter] = {}
-        self._brain: GeminiChatBrain | None = None
+        self._brain: ClaudeChatBrain | None = None
         self._send_lock = asyncio.Lock()
         self._floodwait_until = 0
         self._last_recovery_ts = 0
@@ -181,9 +186,9 @@ class AutoChatEngine:
         self._chatters[source] = ch
         return ch
 
-    async def _get_brain(self) -> GeminiChatBrain:
+    async def _get_brain(self) -> ClaudeChatBrain:
         if self._brain is None:
-            self._brain = GeminiChatBrain()
+            self._brain = ClaudeChatBrain()
         return self._brain
 
     async def _fire_opener(self, conv: Conversation) -> None:
@@ -285,6 +290,26 @@ class AutoChatEngine:
         if int(time.time()) - history_msgs[-1].ts < reply_delay:
             return
 
+        # Она раскусила ИИ? Ловим детерминированно по её последним репликам
+        # ДО нейросети (та отнекивается вместо чистого выхода): шлём
+        # фиксированное прощание и закрываем как handoff на человека.
+        her_tail: list[str] = []
+        for m in reversed(history_msgs):
+            if m.role != "her":
+                break
+            her_tail.append(m.text or "")
+        if looks_like_ai_accusation(" ".join(her_tail)):
+            msg_id = await self._serialized_send(
+                ch, conv.peer_id, AI_DETECTED_FAREWELL
+            )
+            if msg_id is not None:
+                await autochat_db.append_message(
+                    conv.id, "us", AI_DETECTED_FAREWELL, msg_id
+                )
+                await autochat_db.update_after_outgoing(conv.id, msg_id)
+            await self._close(conv, reason=AI_DETECTED_NOTIFY, failed=False)
+            return
+
         bio = await autochat_db.get_pool_bio(conv.source, conv.external_id)
         history_pairs = [(m.role, m.text, m.ts) for m in history_msgs]
         try:
@@ -377,7 +402,7 @@ class AutoChatEngine:
         клиент в reuse-флоу."""
         return await self._get_chatter(source)
 
-    async def get_brain(self) -> GeminiChatBrain:
+    async def get_brain(self) -> ClaudeChatBrain:
         return await self._get_brain()
 
     async def serialized_send(

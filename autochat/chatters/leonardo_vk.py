@@ -19,6 +19,7 @@ from autochat.chatters.base import Chatter
 from autochat.models import ConvMessage
 from autochat.transcribe import transcribe_audio
 from config import load
+from core.vk_throttle import vk_post
 
 log = logging.getLogger(__name__)
 
@@ -261,11 +262,8 @@ class VKChatter(Chatter):
     ) -> Any:
         assert self._http is not None, "call start() first"
         params = {**params, "access_token": self._token, "v": VK_API_VERSION}
-        try:
-            resp = await self._http.post(f"{VK_API_BASE}/{method}", data=params)
-            data = resp.json()
-        except Exception:
-            log.exception("VK call %s failed", method)
+        data = await vk_post(self._http, method, params)
+        if data is None:
             return None if not return_raw else {}
         if "error" in data:
             err = data["error"]
