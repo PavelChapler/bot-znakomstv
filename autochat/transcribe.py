@@ -52,5 +52,9 @@ async def transcribe_audio(
     except Exception:
         log.exception("voice transcribe call failed")
         return None
-    text = (getattr(resp, "text", "") or "").strip()
+    try:
+        text = (resp.text or "").strip()
+    except Exception:
+        log.warning("voice: Gemini не вернул текст (заблокировано?)")
+        return None
     return text or None

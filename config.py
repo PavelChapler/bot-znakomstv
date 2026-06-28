@@ -38,6 +38,10 @@ class Config:
     vk_access_token: str
     vk_leonardo_group: str
 
+    vk_dating_launch_url: str
+    vk_dating_agent: str
+    vk_dating_city_id: int
+
     gemini_api_key: str
     gemini_model: str
 
@@ -77,6 +81,9 @@ def load() -> Config:
         telethon_phone=os.getenv("TELETHON_PHONE", ""),
         vk_access_token=os.getenv("VK_ACCESS_TOKEN", ""),
         vk_leonardo_group=os.getenv("VK_LEONARDO_GROUP", "dayvinchik"),
+        vk_dating_launch_url=os.getenv("VK_DATING_LAUNCH_URL", ""),
+        vk_dating_agent=os.getenv("VK_DATING_AGENT", ""),
+        vk_dating_city_id=_int("VK_DATING_CITY_ID", 0),
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),

@@ -35,6 +35,15 @@ class GeminiScorer(Scorer):
                 "response_mime_type": "application/json",
                 "temperature": 0.2,
             },
+            # Анкеты знакомств — легитимный контент; снимаем штатные блокировки,
+            # иначе Gemini возвращает PROHIBITED_CONTENT по фото и анкета теряется.
+            # Жёсткий prompt-level блок всё равно возможен — его гасит _safe_text.
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
         )
 
     async def score(
@@ -64,7 +73,11 @@ class GeminiScorer(Scorer):
             log.exception("Gemini API error")
             return ScoreResult(score=0, reason=f"ошибка Gemini: {e}")
 
-        text = (resp.text or "").strip()
+        text = self._safe_text(resp)
+        if text is None:
+            reason = self._block_reason(resp)
+            log.warning("Gemini заблокировал ответ: %s", reason)
+            return ScoreResult(score=0, reason=f"Gemini не оценил ({reason})")
         data = self._parse_json(text)
         if data is None:
             return ScoreResult(
@@ -84,6 +97,30 @@ class GeminiScorer(Scorer):
             else None
         )
         return ScoreResult(score=score_val, reason=reason, message=message)
+
+    @staticmethod
+    def _safe_text(resp: Any) -> str | None:
+        """resp.text бросает ValueError, когда Gemini заблокировал промпт/ответ
+        (кандидатов/Part нет). Возвращаем None вместо краша."""
+        try:
+            return (resp.text or "").strip()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _block_reason(resp: Any) -> str:
+        """Причина блокировки для лога/UI (prompt_feedback / finish_reason)."""
+        try:
+            pf = getattr(resp, "prompt_feedback", None)
+            br = getattr(pf, "block_reason", None) if pf else None
+            if br:
+                return f"prompt={br}"
+            cands = getattr(resp, "candidates", None) or []
+            if cands and getattr(cands[0], "finish_reason", None):
+                return f"finish={cands[0].finish_reason}"
+        except Exception:
+            pass
+        return "blocked"
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any] | None:
