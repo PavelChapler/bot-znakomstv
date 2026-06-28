@@ -35,8 +35,10 @@ class Chatter(ABC):
     async def fetch_new_replies(
         self, peer: str, after_msg_id: str | None
     ) -> list[ConvMessage]:
-        """Все её сообщения с external_msg_id > after_msg_id, по возрастанию ts.
-        Объекты возвращаются с conversation_id=0 — caller проставит."""
+        """Все новые сообщения после after_msg_id, по возрастанию ts — ОБЕИХ
+        ролей: её + наши исходящие, включая отправленные ВРУЧНУЮ вне бота. По
+        нашим ручным движок понимает, что мы вмешались, и не дублирует ответ.
+        Объекты с conversation_id=0 — caller проставит; role уже выставлен."""
 
     async def fetch_full_history(
         self, peer: str, limit: int = 50

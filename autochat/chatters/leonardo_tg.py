@@ -90,8 +90,6 @@ class TelethonChatter(Chatter):
         new: list[ConvMessage] = []
         try:
             async for m in self.client.iter_messages(peer, limit=FETCH_LIMIT):
-                if m.out:
-                    continue
                 if after_int is not None and m.id <= after_int:
                     break  # iter_messages идёт по убыванию id
                 text = await self._resolve_text(m)
@@ -101,7 +99,7 @@ class TelethonChatter(Chatter):
                 new.append(ConvMessage(
                     id=0, conversation_id=0,
                     ts=ts,
-                    role="her",
+                    role="us" if m.out else "her",
                     text=text,
                     external_msg_id=str(m.id),
                 ))

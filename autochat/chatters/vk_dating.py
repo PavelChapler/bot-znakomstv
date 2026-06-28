@@ -140,15 +140,14 @@ class VKDatingChatter(Chatter):
                 if mid == after_msg_id:
                     seen_after = True
                 continue
-            if m.get("is_my"):
-                continue
             text = self._content_text(m)
             if not text:
                 continue
             out.append(ConvMessage(
                 id=0, conversation_id=0,
                 ts=self._iso_ts(m.get("created_at")),
-                role="her", text=text, external_msg_id=str(mid),
+                role="us" if m.get("is_my") else "her",
+                text=text, external_msg_id=str(mid),
             ))
         # after не найден в окне (диалог длиннее лимита / старый id) — не
         # рискуем дублями, ждём следующего тика.

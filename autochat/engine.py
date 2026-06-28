@@ -268,9 +268,11 @@ class AutoChatEngine:
             log.exception("autochat poll failed conv %d", conv.id)
             return
         if new_msgs:
+            # new_msgs теперь содержит и её сообщения, и наши исходящие
+            # (в т.ч. отправленные вручную вне бота) — сохраняем по их роли.
             for m in new_msgs:
                 await autochat_db.append_message(
-                    conv.id, "her", m.text, m.external_msg_id, ts=m.ts,
+                    conv.id, m.role, m.text, m.external_msg_id, ts=m.ts,
                 )
             last_id = new_msgs[-1].external_msg_id or ""
             await autochat_db.update_after_incoming(conv.id, last_id)

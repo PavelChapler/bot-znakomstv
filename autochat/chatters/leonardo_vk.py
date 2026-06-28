@@ -145,8 +145,6 @@ class VKChatter(Chatter):
         items = (data or {}).get("items") or []
         new: list[ConvMessage] = []
         for m in items:
-            if m.get("out", 0) != 0:
-                continue
             mid = m.get("id")
             if mid is None:
                 continue
@@ -158,7 +156,7 @@ class VKChatter(Chatter):
             new.append(ConvMessage(
                 id=0, conversation_id=0,
                 ts=m.get("date") or 0,
-                role="her",
+                role="us" if m.get("out") else "her",
                 text=text,
                 external_msg_id=str(mid),
             ))

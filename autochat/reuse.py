@@ -263,7 +263,9 @@ def _choose_action(
 ) -> str:
     """opener / respond / continuation / wait."""
     if our_count == 0:
-        return "opener"
+        # Она написала первой → это не opener (опенер по факту за ней),
+        # а ответ на её сообщение с учётом импортированной истории.
+        return "respond" if last_her_ts else "opener"
     # Кто писал последним?
     her_after_us = last_her_ts and last_her_ts >= last_us_ts
     if her_after_us:
