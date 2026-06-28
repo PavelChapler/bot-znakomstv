@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from config import load
-from core import likes_pool
+from core import blacklist, likes_pool
 from core.models import Profile
 from sources.base import DatingSource
 
@@ -147,6 +147,19 @@ class VKDatingSource(DatingSource):
             meta = (card.get("extra") or {}).get("meta", "")
             # Запоминаем текущую анкету: like()/skip() подействуют на неё.
             self._current = {"user_id": uid, "meta": meta}
+
+            if await blacklist.match(
+                self.name, str(uid),
+                card.get("name"), card.get("age"), self._build_bio(card),
+            ):
+                log.info("VK Знакомства: %s в ЧС — дизлайк без скоринга", uid)
+                await self._react("dating.dislike", uid, meta)
+                continue
+
+            if await self._photo_blacklisted(card):
+                log.info("VK Знакомства: %s фото в ЧС — дизлайк", uid)
+                await self._react("dating.dislike", uid, meta)
+                continue
 
             if card.get("is_deleted") or card.get("is_blocked"):
                 # Негодную карточку дизлайкаем, чтобы убрать из ленты.
@@ -275,6 +288,22 @@ class VKDatingSource(DatingSource):
             **self._auth_fields(),
             "_screen": SCREEN,
         })
+
+    async def _photo_blacklisted(self, card: dict[str, Any]) -> bool:
+        """Совпадает ли фото анкеты с фото-хэшем из ЧС. Качаем одно фото
+        только когда в ЧС вообще есть фото-записи (иначе сразу False)."""
+        hashes = await blacklist.photo_hashes_for(self.name)
+        if not hashes:
+            return False
+        first = next((s for s in (card.get("stories") or [])
+                      if s.get("type") == "photo"), None)
+        if not first:
+            return False
+        url = first.get("url") or first.get("large_url") or first.get("medium_url")
+        if not url:
+            return False
+        blob = await self._download(url)
+        return bool(blob and blacklist.photo_match(blob, hashes))
 
     # ───────── мэтчи (для автопереписки) ─────────
 

@@ -9,6 +9,8 @@ from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InputMediaPhoto,
     Message,
 )
@@ -19,6 +21,7 @@ TG_CAPTION_MAX = 1024
 TG_ALBUM_MAX = 10
 
 from config import load
+from core import blacklist
 from core.handlers.goal import (
     get_dry_run,
     get_goal,
@@ -36,6 +39,20 @@ router = Router()
 
 # одна активная сессия (single user)
 _current: SessionController | None = None
+
+
+def _blacklist_kb(profile) -> InlineKeyboardMarkup | None:
+    """Кнопка «🚫 В ЧС» — только для vk_dating, где external_id == стабильный
+    user_id (точный матч). У Леонардо id анкеты нестабилен (id сообщения) —
+    там ЧС будет fuzzy-режимом, кнопку пока не показываем."""
+    if profile.source != "vk_dating" or not profile.external_id:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🚫 В ЧС",
+            callback_data=f"bladd:{profile.source}:{profile.external_id}",
+        )
+    ]])
 
 
 @router.callback_query(F.data.startswith("src:"))
@@ -85,6 +102,7 @@ async def on_source_chosen(query: CallbackQuery) -> None:
     bot = query.bot
 
     async def on_progress(decision: Decision, stats: SessionStats) -> None:
+        blacklist.remember(decision.profile)
         emoji = "❤️" if decision.action == "like" else "👎"
         prefix = "[DRY] " if decision.dry_run else ""
         bio_short = (decision.profile.bio or "").strip().replace("\n", " ")
@@ -107,9 +125,10 @@ async def on_source_chosen(query: CallbackQuery) -> None:
 
         if bot is None:
             return
+        kb = _blacklist_kb(decision.profile)
         try:
             if not photos:
-                await bot.send_message(chat_id, text)
+                await bot.send_message(chat_id, text, reply_markup=kb)
                 return
             caption = text if len(text) <= TG_CAPTION_MAX else None
             if len(photos) == 1:
@@ -117,6 +136,7 @@ async def on_source_chosen(query: CallbackQuery) -> None:
                     chat_id,
                     BufferedInputFile(bytes(photos[0]), filename="photo.jpg"),
                     caption=caption,
+                    reply_markup=kb if caption is not None else None,
                 )
             else:
                 media = [
@@ -136,8 +156,11 @@ async def on_source_chosen(query: CallbackQuery) -> None:
                 ]
                 await bot.send_media_group(chat_id, media)
             if caption is None:
-                # Подпись не влезла в media — шлём отдельным сообщением.
-                await bot.send_message(chat_id, text)
+                # Подпись не влезла в media — шлём отдельным сообщением (с кнопкой).
+                await bot.send_message(chat_id, text, reply_markup=kb)
+            elif len(photos) > 1 and kb is not None:
+                # У альбома кнопку к медиа не прикрепить — отдельным сообщением.
+                await bot.send_message(chat_id, "⤴️ анкета выше", reply_markup=kb)
         except Exception:
             log.exception("failed to send progress with photos, fallback to text")
             try:

@@ -11,7 +11,7 @@ from aiogram.types import TelegramObject, User
 
 from autochat.handlers import router as autochat_router
 from config import load
-from core.handlers import goal, likes, menu, sources, status
+from core.handlers import blacklist, goal, likes, menu, sources, status
 
 log = logging.getLogger(__name__)
 
@@ -46,5 +46,6 @@ def build_bot_and_dispatcher() -> tuple[Bot, Dispatcher]:
     dp.include_router(sources.router)
     dp.include_router(status.router)
     dp.include_router(likes.router)
+    dp.include_router(blacklist.router)
     dp.include_router(autochat_router)
     return bot, dp

@@ -64,6 +64,7 @@ async def main_menu_kb() -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(text="🤖 Авточат", callback_data="autochat:menu"),
+            InlineKeyboardButton(text="🚫 ЧС", callback_data="bllist"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

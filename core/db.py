@@ -87,6 +87,22 @@ CREATE TABLE IF NOT EXISTS autochat_messages (
 
 CREATE INDEX IF NOT EXISTS idx_autochat_msgs_conv
     ON autochat_messages(conversation_id, ts);
+
+-- Чёрный список анкет. Этап 1: точное совпадение по (source, external_id);
+-- для vk_dating external_id == стабильный dating user_id. photo_hashes —
+-- JSON-список перцептивных хэшей фото (задел под fuzzy-матчинг, этап 2).
+CREATE TABLE IF NOT EXISTS blacklist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    name TEXT,
+    age INTEGER,
+    photo_hashes TEXT NOT NULL DEFAULT '[]',
+    keywords TEXT NOT NULL DEFAULT '[]',
+    note TEXT,
+    created_ts INTEGER NOT NULL,
+    UNIQUE(source, external_id)
+);
 """
 
 
@@ -113,6 +129,14 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE autochat_conversations "
             "ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.commit()
+
+    async with conn.execute("PRAGMA table_info(blacklist)") as cur:
+        bl_cols = {row[1] for row in await cur.fetchall()}
+    if bl_cols and "keywords" not in bl_cols:
+        await conn.execute(
+            "ALTER TABLE blacklist ADD COLUMN keywords TEXT NOT NULL DEFAULT '[]'"
         )
         await conn.commit()
 
@@ -273,3 +297,78 @@ async def delete_liked(pool_id: int) -> list[str]:
         await conn.execute("DELETE FROM liked_pool WHERE id = ?", (pool_id,))
         await conn.commit()
         return paths
+
+
+# ───────── чёрный список ─────────
+
+async def blacklist_add(
+    source: str,
+    external_id: str,
+    name: str | None,
+    age: int | None,
+    photo_hashes: list[str],
+    note: str | None,
+    keywords: list[str] | None = None,
+) -> bool:
+    """Добавить анкету в ЧС. True — добавили, False — уже была."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT OR IGNORE INTO blacklist"
+            "(source, external_id, name, age, photo_hashes, keywords, note, created_ts) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (source, external_id, name, age, json.dumps(photo_hashes),
+             json.dumps(keywords or []), note, int(time.time())),
+        )
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def blacklist_manual_list(source: str) -> list[dict[str, Any]]:
+    """Ручные fuzzy-записи (external_id вида 'manual:...') — для матчинга
+    по имени+возрасту+ключевым словам, когда точного user_id нет."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT name, age, keywords FROM blacklist "
+            "WHERE source = ? AND external_id LIKE 'manual:%'",
+            (source,),
+        ) as cur:
+            return [
+                {"name": r["name"], "age": r["age"],
+                 "keywords": json.loads(r["keywords"] or "[]")}
+                for r in await cur.fetchall()
+            ]
+
+
+async def is_blacklisted(source: str, external_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT 1 FROM blacklist WHERE source = ? AND external_id = ? LIMIT 1",
+            (source, external_id),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def blacklist_list(source: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM blacklist"
+    params: tuple[Any, ...] = ()
+    if source:
+        sql += " WHERE source = ?"
+        params = (source,)
+    sql += " ORDER BY created_ts DESC"
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(sql, params) as cur:
+            out: list[dict[str, Any]] = []
+            for r in await cur.fetchall():
+                d = dict(r)
+                d["photo_hashes"] = json.loads(d["photo_hashes"] or "[]")
+                d["keywords"] = json.loads(d.get("keywords") or "[]")
+                out.append(d)
+            return out
+
+
+async def blacklist_delete(bl_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM blacklist WHERE id = ?", (bl_id,))
+        await conn.commit()
