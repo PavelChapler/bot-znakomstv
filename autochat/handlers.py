@@ -20,6 +20,7 @@ from aiogram.types import (
 
 from autochat import config
 from autochat import db as autochat_db
+from core.registry import all_sources, get_source_class
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -31,6 +32,20 @@ STATE_LABEL = {
     "done": "✅ done",
     "failed": "❌ failed",
 }
+
+
+def _source_kb(prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора источника для per-source настройки авточата."""
+    rows = [
+        [InlineKeyboardButton(text=cls.title, callback_data=f"{prefix}:{cls.name}")]
+        for cls in all_sources() if cls.name != "twinby"
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _source_title(source: str) -> str:
+    cls = get_source_class(source)
+    return cls.title if cls else source
 
 
 class SetAutochatGoal(StatesGroup):
@@ -122,23 +137,36 @@ async def cb_toggle_voice(query: CallbackQuery) -> None:
 
 @router.message(Command("autochat_goal"))
 async def cmd_goal(message: Message, state: FSMContext) -> None:
-    cur = await config.get_goal_prompt()
+    await state.clear()
     await message.answer(
-        f"Текущая ЦЕЛЬ автопереписки:\n\n{escape(cur)}\n\n"
-        "Отправь новый текст или /cancel."
+        "🎯 Цель автопереписки — для какого источника?",
+        reply_markup=_source_kb("autochat:goalsrc"),
     )
-    await state.set_state(SetAutochatGoal.waiting)
 
 
 @router.callback_query(F.data == "autochat:goal")
 async def cb_goal(query: CallbackQuery, state: FSMContext) -> None:
-    cur = await config.get_goal_prompt()
+    await state.clear()
     if query.message and isinstance(query.message, Message):
         await query.message.answer(
-            f"Текущая ЦЕЛЬ автопереписки:\n\n{escape(cur)}\n\n"
+            "🎯 Цель автопереписки — для какого источника?",
+            reply_markup=_source_kb("autochat:goalsrc"),
+        )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("autochat:goalsrc:"))
+async def cb_goalsrc(query: CallbackQuery, state: FSMContext) -> None:
+    assert query.data is not None
+    source = query.data.split(":", 2)[2]
+    cur = await config.get_goal_prompt(source)
+    await state.update_data(source=source)
+    await state.set_state(SetAutochatGoal.waiting)
+    if query.message and isinstance(query.message, Message):
+        await query.message.answer(
+            f"Цель автопереписки для «{_source_title(source)}»:\n\n{escape(cur)}\n\n"
             "Отправь новый текст или /cancel."
         )
-    await state.set_state(SetAutochatGoal.waiting)
     await query.answer()
 
 
@@ -155,32 +183,51 @@ async def save_goal(message: Message, state: FSMContext) -> None:
         await message.answer("Пусто. Попробуй ещё раз или /cancel.")
         return
     from core import db
-    await db.set_setting(config.KEY_GOAL_PROMPT, text)
+    data = await state.get_data()
+    source = data.get("source")
+    await db.set_setting(
+        f"{config.KEY_GOAL_PROMPT}:{source}" if source else config.KEY_GOAL_PROMPT,
+        text,
+    )
     await state.clear()
-    await message.answer("Цель сохранена.")
+    suffix = f" для «{_source_title(source)}»" if source else ""
+    await message.answer(f"Цель сохранена{suffix}.")
 
 
 # ───────── стиль ─────────
 
 @router.message(Command("autochat_style"))
 async def cmd_style(message: Message, state: FSMContext) -> None:
-    cur = await config.get_style_prompt()
+    await state.clear()
     await message.answer(
-        f"Текущий СТИЛЬ автопереписки:\n\n{escape(cur)}\n\n"
-        "Отправь новый текст или /cancel."
+        "🎭 Стиль автопереписки — для какого источника?",
+        reply_markup=_source_kb("autochat:stylesrc"),
     )
-    await state.set_state(SetAutochatStyle.waiting)
 
 
 @router.callback_query(F.data == "autochat:style")
 async def cb_style(query: CallbackQuery, state: FSMContext) -> None:
-    cur = await config.get_style_prompt()
+    await state.clear()
     if query.message and isinstance(query.message, Message):
         await query.message.answer(
-            f"Текущий СТИЛЬ автопереписки:\n\n{escape(cur)}\n\n"
+            "🎭 Стиль автопереписки — для какого источника?",
+            reply_markup=_source_kb("autochat:stylesrc"),
+        )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("autochat:stylesrc:"))
+async def cb_stylesrc(query: CallbackQuery, state: FSMContext) -> None:
+    assert query.data is not None
+    source = query.data.split(":", 2)[2]
+    cur = await config.get_style_prompt(source)
+    await state.update_data(source=source)
+    await state.set_state(SetAutochatStyle.waiting)
+    if query.message and isinstance(query.message, Message):
+        await query.message.answer(
+            f"Стиль автопереписки для «{_source_title(source)}»:\n\n{escape(cur)}\n\n"
             "Отправь новый текст или /cancel."
         )
-    await state.set_state(SetAutochatStyle.waiting)
     await query.answer()
 
 
@@ -197,9 +244,15 @@ async def save_style(message: Message, state: FSMContext) -> None:
         await message.answer("Пусто. Попробуй ещё раз или /cancel.")
         return
     from core import db
-    await db.set_setting(config.KEY_STYLE_PROMPT, text)
+    data = await state.get_data()
+    source = data.get("source")
+    await db.set_setting(
+        f"{config.KEY_STYLE_PROMPT}:{source}" if source else config.KEY_STYLE_PROMPT,
+        text,
+    )
     await state.clear()
-    await message.answer("Стиль сохранён.")
+    suffix = f" для «{_source_title(source)}»" if source else ""
+    await message.answer(f"Стиль сохранён{suffix}.")
 
 
 # ───────── список диалогов ─────────

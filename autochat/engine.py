@@ -149,8 +149,6 @@ class AutoChatEngine:
 
     async def _recovery_scan(self, now_ts: int) -> None:
         delay = await config.get_delay_sec()
-        goal = await config.get_goal_prompt()
-        style = await config.get_style_prompt()
         rows = await autochat_db.list_recent_pool_without_conv(
             now_ts - RECOVERY_LOOKBACK_SEC, limit=50
         )
@@ -160,8 +158,8 @@ class AutoChatEngine:
                 source=r["source"],
                 external_id=r["external_id"],
                 profile_url=r["profile_url"],
-                goal_prompt=goal,
-                style_prompt=style,
+                goal_prompt=await config.get_goal_prompt(r["source"]),
+                style_prompt=await config.get_style_prompt(r["source"]),
                 scheduled_send_ts=scheduled,
             )
             if conv_id is not None:

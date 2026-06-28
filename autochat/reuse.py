@@ -87,8 +87,8 @@ async def reuse_from_pool(
     history = await chatter.fetch_full_history(peer, limit=HISTORY_IMPORT_LIMIT)
 
     # Создаём/обновляем conv
-    goal = await config.get_goal_prompt()
-    style = await config.get_style_prompt()
+    goal = await config.get_goal_prompt(source)
+    style = await config.get_style_prompt(source)
     if conv is None:
         conv_id = await autochat_db.create_conversation(
             source=source,

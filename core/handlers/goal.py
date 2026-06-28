@@ -6,10 +6,16 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import load
 from core import db
+from core.registry import all_sources, get_source_class
 
 router = Router()
 
@@ -26,9 +32,19 @@ DEFAULT_MESSAGE_STYLE = (
 )
 
 
-async def get_goal() -> str:
+async def _scoped(key: str, source: str | None) -> str | None:
+    """Значение с фоллбэком: ключ для источника → общий ключ. Так per-source
+    переопределяет, а старые общие значения остаются дефолтом для всех."""
+    if source:
+        v = await db.get_setting(f"{key}:{source}")
+        if v:
+            return v
+    return await db.get_setting(key)
+
+
+async def get_goal(source: str | None = None) -> str:
     cfg = load()
-    val = await db.get_setting(KEY_GOAL)
+    val = await _scoped(KEY_GOAL, source)
     return val if val else cfg.default_goal
 
 
@@ -53,9 +69,23 @@ async def get_message_enabled() -> bool:
     return raw == "1"
 
 
-async def get_message_style() -> str:
-    val = await db.get_setting(KEY_MESSAGE_STYLE)
+async def get_message_style(source: str | None = None) -> str:
+    val = await _scoped(KEY_MESSAGE_STYLE, source)
     return val if val else DEFAULT_MESSAGE_STYLE
+
+
+def _source_kb(prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора источника для per-source настройки."""
+    rows = [
+        [InlineKeyboardButton(text=cls.title, callback_data=f"{prefix}:{cls.name}")]
+        for cls in all_sources() if cls.name != "twinby"
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _source_title(source: str) -> str:
+    cls = get_source_class(source)
+    return cls.title if cls else source
 
 
 class SetGoal(StatesGroup):
@@ -72,21 +102,36 @@ class SetStyle(StatesGroup):
 
 @router.message(Command("goal"))
 async def cmd_goal(message: Message, state: FSMContext) -> None:
-    cur = await get_goal()
+    await state.clear()
     await message.answer(
-        f"Текущая цель:\n\n{escape(cur)}\n\nОтправь новый текст, чтобы заменить, или /cancel."
+        "🎯 Цель лайков (кого лайкать) — для какого источника?",
+        reply_markup=_source_kb("settings:goalsrc"),
     )
-    await state.set_state(SetGoal.waiting)
 
 
 @router.callback_query(F.data == "settings:goal")
 async def cb_goal(query: CallbackQuery, state: FSMContext) -> None:
-    cur = await get_goal()
+    await state.clear()
     if query.message:
         await query.message.answer(
-            f"Текущая цель:\n\n{escape(cur)}\n\nОтправь новый текст, чтобы заменить, или /cancel."
+            "🎯 Цель лайков (кого лайкать) — для какого источника?",
+            reply_markup=_source_kb("settings:goalsrc"),
         )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("settings:goalsrc:"))
+async def cb_goalsrc(query: CallbackQuery, state: FSMContext) -> None:
+    assert query.data is not None
+    source = query.data.split(":", 2)[2]
+    cur = await get_goal(source)
+    await state.update_data(source=source)
     await state.set_state(SetGoal.waiting)
+    if query.message:
+        await query.message.answer(
+            f"Цель лайков для «{_source_title(source)}»:\n\n{escape(cur)}\n\n"
+            "Отправь новый текст, чтобы заменить, или /cancel."
+        )
     await query.answer()
 
 
@@ -102,9 +147,12 @@ async def save_goal(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Пустой текст. Попробуй ещё раз или /cancel.")
         return
-    await db.set_setting(KEY_GOAL, text)
+    data = await state.get_data()
+    source = data.get("source")
+    await db.set_setting(f"{KEY_GOAL}:{source}" if source else KEY_GOAL, text)
     await state.clear()
-    await message.answer("Цель сохранена.")
+    suffix = f" для «{_source_title(source)}»" if source else ""
+    await message.answer(f"Цель сохранена{suffix}.")
 
 
 @router.message(Command("threshold"))
@@ -190,23 +238,36 @@ async def cb_toggle_message(query: CallbackQuery) -> None:
 
 @router.message(Command("style"))
 async def cmd_style(message: Message, state: FSMContext) -> None:
-    cur = await get_message_style()
+    await state.clear()
     await message.answer(
-        f"Текущий стиль сообщений:\n\n{escape(cur)}\n\n"
-        "Отправь новый текст, чтобы заменить, или /cancel."
+        "✉️ Стиль сообщения к лайку — для какого источника?",
+        reply_markup=_source_kb("settings:stylesrc"),
     )
-    await state.set_state(SetStyle.waiting)
 
 
 @router.callback_query(F.data == "settings:style")
 async def cb_style(query: CallbackQuery, state: FSMContext) -> None:
-    cur = await get_message_style()
+    await state.clear()
     if query.message:
         await query.message.answer(
-            f"Текущий стиль сообщений:\n\n{escape(cur)}\n\n"
+            "✉️ Стиль сообщения к лайку — для какого источника?",
+            reply_markup=_source_kb("settings:stylesrc"),
+        )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("settings:stylesrc:"))
+async def cb_stylesrc(query: CallbackQuery, state: FSMContext) -> None:
+    assert query.data is not None
+    source = query.data.split(":", 2)[2]
+    cur = await get_message_style(source)
+    await state.update_data(source=source)
+    await state.set_state(SetStyle.waiting)
+    if query.message:
+        await query.message.answer(
+            f"Стиль сообщения для «{_source_title(source)}»:\n\n{escape(cur)}\n\n"
             "Отправь новый текст, чтобы заменить, или /cancel."
         )
-    await state.set_state(SetStyle.waiting)
     await query.answer()
 
 
@@ -222,6 +283,11 @@ async def save_style(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Пустой текст. Попробуй ещё раз или /cancel.")
         return
-    await db.set_setting(KEY_MESSAGE_STYLE, text)
+    data = await state.get_data()
+    source = data.get("source")
+    await db.set_setting(
+        f"{KEY_MESSAGE_STYLE}:{source}" if source else KEY_MESSAGE_STYLE, text
+    )
     await state.clear()
-    await message.answer("Стиль сохранён.")
+    suffix = f" для «{_source_title(source)}»" if source else ""
+    await message.answer(f"Стиль сохранён{suffix}.")

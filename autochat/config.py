@@ -67,13 +67,22 @@ async def get_max_msgs() -> int:
         return DEFAULT_MAX_MSGS
 
 
-async def get_goal_prompt() -> str:
-    val = await db.get_setting(KEY_GOAL_PROMPT)
+async def _scoped(key: str, source: str | None) -> str | None:
+    """Значение с фоллбэком: ключ для источника → общий ключ."""
+    if source:
+        v = await db.get_setting(f"{key}:{source}")
+        if v:
+            return v
+    return await db.get_setting(key)
+
+
+async def get_goal_prompt(source: str | None = None) -> str:
+    val = await _scoped(KEY_GOAL_PROMPT, source)
     return val if val else DEFAULT_GOAL_PROMPT
 
 
-async def get_style_prompt() -> str:
-    val = await db.get_setting(KEY_STYLE_PROMPT)
+async def get_style_prompt(source: str | None = None) -> str:
+    val = await _scoped(KEY_STYLE_PROMPT, source)
     return val if val else DEFAULT_STYLE_PROMPT
 
 

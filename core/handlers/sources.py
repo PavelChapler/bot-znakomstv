@@ -57,11 +57,11 @@ async def on_source_chosen(query: CallbackQuery) -> None:
         return
 
     cfg = load()
-    goal = await get_goal()
+    goal = await get_goal(name)
     threshold = await get_threshold()
     dry_run = await get_dry_run()
     message_enabled = await get_message_enabled()
-    style = await get_message_style() if message_enabled else None
+    style = await get_message_style(name) if message_enabled else None
     gen_message_if_score_ge = threshold if message_enabled else None
 
     try:
