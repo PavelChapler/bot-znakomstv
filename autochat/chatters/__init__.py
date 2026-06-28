@@ -10,12 +10,13 @@ from autochat.chatters.base import Chatter
 from autochat.chatters.leonardo_tg import TelethonChatter
 from autochat.chatters.leonardo_vk import VKChatter
 from autochat.chatters.stub import StubChatter
+from autochat.chatters.vk_dating import VKDatingChatter
 
 _REGISTRY: dict[str, type[Chatter]] = {
     "leonardo_tg": TelethonChatter,
     "leonardo_vk": VKChatter,
     "twinby": StubChatter,
-    "vk_dating": StubChatter,
+    "vk_dating": VKDatingChatter,
 }
 
 

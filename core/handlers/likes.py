@@ -288,7 +288,7 @@ async def _show_collect_menu(message: Message) -> None:
             text=cls.title, callback_data=f"likes:collect:{cls.name}"
         )]
         for cls in all_sources()
-        if cls.name.startswith("leonardo_")
+        if cls.name.startswith("leonardo_") or cls.name == "vk_dating"
     ]
     if not kb_rows:
         await message.answer("Нет источников для сбора лайков.")

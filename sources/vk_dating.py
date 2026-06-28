@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 
 from config import load
+from core import likes_pool
 from core.models import Profile
 from sources.base import DatingSource
 
@@ -58,6 +59,8 @@ FEED_COUNT = 20
 MAX_PHOTOS = 4
 # Защита от зацикливания на негодных карточках за один next_profile.
 MAX_SCAN_PER_CALL = 60
+# Потолок мэтчей за один scan_history_for_incoming.
+SCAN_MAX_MATCHES = 200
 # Минимальный интервал между вызовами dating.vk.ru (≈3 req/sec).
 MIN_INTERVAL_SEC = 0.34
 
@@ -187,18 +190,7 @@ class VKDatingSource(DatingSource):
                  len(self._feed), self._remaining)
 
     async def _parse_card(self, card: dict[str, Any]) -> Profile | None:
-        photos: list[bytes] = []
-        for story in (card.get("stories") or []):
-            if len(photos) >= MAX_PHOTOS:
-                break
-            if story.get("type") != "photo":
-                continue
-            url = story.get("url") or story.get("large_url") or story.get("medium_url")
-            if not url:
-                continue
-            blob = await self._download(url)
-            if blob:
-                photos.append(blob)
+        photos = await self._download_stories(card.get("stories") or [])
         if not photos:
             return None
         return Profile(
@@ -284,6 +276,53 @@ class VKDatingSource(DatingSource):
             "_screen": SCREEN,
         })
 
+    # ───────── мэтчи (для автопереписки) ─────────
+
+    async def scan_history_for_incoming(self) -> dict[str, Any]:
+        """Собрать взаимные симпатии (мэтчи) из messenger.getChats в пул.
+        Односторонние входящие лайки в VK Знакомствах заблюрены и без id,
+        поэтому собираем именно мэтчи (filter=match) — у них фото открыты.
+        Кладём как kind='mutual'; profile_url='vkdating:<user_id>', откуда
+        VKDatingChatter резолвит peer для переписки."""
+        saved = 0
+        duplicates = 0
+        diag: list[dict[str, Any]] = []
+        limit = 24
+        offset = 0
+        while offset < SCAN_MAX_MATCHES:
+            data = await self._call("messenger.getChats", {
+                "limit": limit, "offset": offset, "filter": "match",
+                **self._auth_fields(),
+            })
+            chats = data.get("chats") if isinstance(data, dict) else None
+            if not chats:
+                break
+            for chat in chats:
+                user = chat.get("user") or {}
+                uid = chat.get("user_id") or user.get("id")
+                if not uid:
+                    continue
+                name = (user.get("name") or "").strip()
+                age = user.get("age")
+                bio = f"{name}, {age}" if name and age else name
+                photos = await self._download_stories(user.get("stories") or [])
+                diag.append({
+                    "id": uid, "has_media": bool(photos),
+                    "kind": "match", "text": name,
+                })
+                profile = Profile(
+                    source=self.name, external_id=str(uid),
+                    bio=bio, photos=photos,
+                )
+                if await likes_pool.save_profile(profile, "mutual", f"vkdating:{uid}"):
+                    saved += 1
+                else:
+                    duplicates += 1
+            if len(chats) < limit:
+                break
+            offset += limit
+        return {"saved": saved, "duplicates": duplicates, "diag": diag}
+
     # ───────── http helpers ─────────
 
     def _auth_fields(self) -> dict[str, Any]:
@@ -294,6 +333,22 @@ class VKDatingSource(DatingSource):
             "_session": self._session or "",
             "_screen": SCREEN,
         }
+
+    async def _download_stories(self, stories: list[dict[str, Any]]) -> list[bytes]:
+        """Скачать до MAX_PHOTOS фото из stories[] (url — полное, не blur)."""
+        photos: list[bytes] = []
+        for story in stories:
+            if len(photos) >= MAX_PHOTOS:
+                break
+            if story.get("type") != "photo":
+                continue
+            url = story.get("url") or story.get("large_url") or story.get("medium_url")
+            if not url:
+                continue
+            blob = await self._download(url)
+            if blob:
+                photos.append(blob)
+        return photos
 
     async def _download(self, url: str) -> bytes | None:
         assert self._http is not None
